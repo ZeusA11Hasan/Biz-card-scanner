@@ -1,3 +1,11 @@
+const API_URL = window.FOLIO_API_URL || '/api';
+const poolData = {
+    UserPoolId: 'ap-southeast-1_U29IJAttm',
+    ClientId: '1jpbte6se46l27in59aiuc3lnv',
+};
+// TEMP: set false to re-enable Cognito sign-in
+const AUTH_DISABLED = true;
+const TEMP_USER_ID = 'local-dev-user';
 // API Configuration done by deploy.sh (assumed to be injected via deploy.sh)
 document.addEventListener('DOMContentLoaded', () => {
     console.log('DOM fully loaded');
@@ -34,7 +42,279 @@ document.addEventListener('DOMContentLoaded', () => {
     const searchContacts = document.getElementById('searchContacts');
     const filterByTag = document.getElementById('filterByTag');
     const filterByIndustry = document.getElementById('filterByIndustry');
+    const filterFollowUp = document.getElementById('filterFollowUp');
+    const followUpHint = document.getElementById('followUpHint');
     const sortContacts = document.getElementById('sortContacts');
+    const exportCsvBtn = document.getElementById('exportCsvBtn');
+    const myCardBtn = document.getElementById('myCardBtn');
+    const myCardContent = document.getElementById('myCardContent');
+    const publicCardContent = document.getElementById('publicCardContent');
+    const CONTACTS_IDB_NAME = 'folio_offline';
+    const CONTACTS_IDB_STORE = 'contacts_cache';
+    const MY_CARD_PREFIX = 'folio_my_card_';
+
+    function normalizeEmail(email) {
+        return (email || '').trim().toLowerCase();
+    }
+
+    function normalizePhone(phone) {
+        return (phone || '').toString().replace(/\D/g, '');
+    }
+
+    function escapeVCardValue(value) {
+        return (value || '').toString()
+            .replace(/\\/g, '\\\\')
+            .replace(/\r\n/g, '\\n')
+            .replace(/\n/g, '\\n')
+            .replace(/\r/g, '\\n')
+            .replace(/,/g, '\\,')
+            .replace(/;/g, '\\;');
+    }
+
+    function normalizeHref(value) {
+        const raw = (value || '').trim();
+        if (!raw) return '';
+        if (/^(https?:|mailto:|tel:)/i.test(raw)) return raw;
+        return `https://${raw}`;
+    }
+
+    function splitPersonName(fullName) {
+        const parts = (fullName || '').trim().split(/\s+/).filter(Boolean);
+        if (!parts.length) return { first: '', last: '' };
+        if (parts.length === 1) return { first: parts[0], last: '' };
+        return { first: parts.slice(0, -1).join(' '), last: parts[parts.length - 1] };
+    }
+
+    function buildVCard(person) {
+        const name = person.name || '';
+        const { first, last } = splitPersonName(name);
+        const lines = [
+            'BEGIN:VCARD',
+            'VERSION:3.0',
+        ];
+        if (name) {
+            lines.push(`N:${escapeVCardValue(last)};${escapeVCardValue(first)};;;`);
+            lines.push(`FN:${escapeVCardValue(name)}`);
+        }
+        if (person.company) lines.push(`ORG:${escapeVCardValue(person.company)}`);
+        if (person.title) lines.push(`TITLE:${escapeVCardValue(person.title)}`);
+        if (person.email) lines.push(`EMAIL;TYPE=WORK:${escapeVCardValue(person.email)}`);
+        if (person.phone) lines.push(`TEL;TYPE=CELL,VOICE:${escapeVCardValue(person.phone)}`);
+        if (person.address) lines.push(`ADR;TYPE=WORK:;;${escapeVCardValue(person.address)};;;`);
+        if (person.website) lines.push(`URL:${escapeVCardValue(normalizeHref(person.website))}`);
+        if (person.profileUrl) lines.push(`URL:${escapeVCardValue(person.profileUrl)}`);
+        ['linkedin', 'twitter', 'instagram', 'github'].forEach((key) => {
+            const href = normalizeHref(person[key]);
+            if (href) lines.push(`URL;TYPE=${key}:${escapeVCardValue(href)}`);
+        });
+        const photo = person.avatar || person.avatarUrl || '';
+        if (/^https?:/i.test(photo)) lines.push(`PHOTO;VALUE=URI:${photo}`);
+        const note = person.bio || person.notes;
+        if (note) lines.push(`NOTE:${escapeVCardValue(note)}`);
+        lines.push('END:VCARD');
+        return lines.join('\r\n');
+    }
+
+    function contactShareText(person) {
+        return [
+            person.name,
+            [person.title, person.company].filter(Boolean).join(' · '),
+            person.email,
+            person.phone,
+            person.website || person.linkedin,
+        ].filter(Boolean).join('\n');
+    }
+
+    function downloadBlob(blob, filename) {
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+    }
+
+    async function copyTextToClipboard(text) {
+        if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(text);
+            return true;
+        }
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return ok;
+    }
+
+    async function shareVCardContent(vcardContent, person, filename) {
+        const safeName = (filename || person.name || 'contact').replace(/[^\w.-]+/g, '_');
+        const fileName = safeName.endsWith('.vcf') ? safeName : `${safeName}.vcf`;
+        const blob = new Blob([vcardContent], { type: 'text/vcard' });
+        const file = new File([blob], fileName, { type: 'text/vcard' });
+        const shareData = {
+            title: person.name || 'Contact',
+            text: contactShareText(person),
+            files: [file],
+        };
+        try {
+            if (navigator.share && (!navigator.canShare || navigator.canShare(shareData))) {
+                await navigator.share(shareData);
+                return 'shared';
+            }
+        } catch (err) {
+            if (err && err.name === 'AbortError') return 'aborted';
+        }
+        try {
+            if (navigator.share) {
+                await navigator.share({ title: person.name || 'Contact', text: contactShareText(person) });
+                return 'shared-text';
+            }
+        } catch (err) {
+            if (err && err.name === 'AbortError') return 'aborted';
+        }
+        downloadBlob(blob, fileName);
+        await copyTextToClipboard(contactShareText(person));
+        return 'fallback';
+    }
+
+    function findDuplicateContacts(newContact, allContacts) {
+        const email = normalizeEmail(newContact.email);
+        const phone = normalizePhone(newContact.phone);
+        return (allContacts || []).filter((c) => {
+            if (!c || c.cardId === newContact.cardId) return false;
+            const emailMatch = email && normalizeEmail(c.email) === email;
+            const phoneMatch = phone && phone.length >= 7 && normalizePhone(c.phone) === phone;
+            return emailMatch || phoneMatch;
+        });
+    }
+
+    function warnIfDuplicates(newContacts) {
+        const pool = [...contactsData];
+        (newContacts || []).forEach((nc) => {
+            if (!nc) return;
+            const dups = findDuplicateContacts(nc, pool);
+            if (dups.length) {
+                const names = dups.map((d) => d.name || 'Unknown').slice(0, 3).join(', ');
+                showToast(`Possible duplicate: ${nc.name || 'New contact'} matches ${names}`, 'warning');
+            }
+            pool.push(nc);
+        });
+    }
+
+    function parseTagsInput(value) {
+        if (Array.isArray(value)) return value.map((t) => String(t).trim()).filter(Boolean);
+        return String(value || '').split(',').map((t) => t.trim()).filter(Boolean);
+    }
+
+    function getFollowUpStatus(followUpDate) {
+        if (!followUpDate) return null;
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const due = new Date(followUpDate + 'T00:00:00');
+        if (Number.isNaN(due.getTime())) return null;
+        const diffDays = Math.round((due - today) / 86400000);
+        if (diffDays < 0) return 'overdue';
+        if (diffDays <= 7) return 'dueSoon';
+        return 'upcoming';
+    }
+
+    function formatFollowUpLabel(followUpDate) {
+        const status = getFollowUpStatus(followUpDate);
+        if (!status) return '';
+        if (status === 'overdue') return `Overdue ${followUpDate}`;
+        if (status === 'dueSoon') return `Due ${followUpDate}`;
+        return `Follow-up ${followUpDate}`;
+    }
+
+    function myCardStorageKey() {
+        return `${MY_CARD_PREFIX}${userId || TEMP_USER_ID}`;
+    }
+
+    function loadMyCard() {
+        try {
+            const raw = localStorage.getItem(myCardStorageKey());
+            return raw ? JSON.parse(raw) : {};
+        } catch (e) {
+            return {};
+        }
+    }
+
+    function saveMyCard(card) {
+        localStorage.setItem(myCardStorageKey(), JSON.stringify(card));
+    }
+
+    function openContactsIdb() {
+        return new Promise((resolve, reject) => {
+            const req = indexedDB.open(CONTACTS_IDB_NAME, 1);
+            req.onupgradeneeded = () => {
+                const db = req.result;
+                if (!db.objectStoreNames.contains(CONTACTS_IDB_STORE)) {
+                    db.createObjectStore(CONTACTS_IDB_STORE);
+                }
+            };
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    async function cacheContactsSnapshot(contacts) {
+        try {
+            const db = await openContactsIdb();
+            await new Promise((resolve, reject) => {
+                const tx = db.transaction(CONTACTS_IDB_STORE, 'readwrite');
+                tx.objectStore(CONTACTS_IDB_STORE).put({
+                    userId: userId || TEMP_USER_ID,
+                    contacts,
+                    savedAt: Date.now(),
+                }, 'latest');
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+            db.close();
+        } catch (e) {
+            console.warn('Could not cache contacts offline:', e);
+        }
+    }
+
+    async function loadCachedContactsSnapshot() {
+        try {
+            const db = await openContactsIdb();
+            const record = await new Promise((resolve, reject) => {
+                const tx = db.transaction(CONTACTS_IDB_STORE, 'readonly');
+                const req = tx.objectStore(CONTACTS_IDB_STORE).get('latest');
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => reject(req.error);
+            });
+            db.close();
+            if (record && Array.isArray(record.contacts)) return record.contacts;
+        } catch (e) {
+            console.warn('Could not load cached contacts:', e);
+        }
+        return null;
+    }
+
+    function csvEscape(value) {
+        const str = value == null ? '' : String(value);
+        if (/[",\n]/.test(str)) return `"${str.replace(/"/g, '""')}"`;
+        return str;
+    }
+
+    function exportContactsCsv(contacts) {
+        const cols = ['name', 'title', 'company', 'department', 'industry', 'email', 'phone', 'website', 'address', 'notes', 'tags', 'followUpDate', 'dateAdded'];
+        const rows = [cols.join(',')];
+        contacts.forEach((c) => {
+            rows.push(cols.map((key) => {
+                if (key === 'tags') return csvEscape(Array.isArray(c.tags) ? c.tags.join('; ') : (c.tags || ''));
+                return csvEscape(c[key] || '');
+            }).join(','));
+        });
+        downloadBlob(new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8' }), 'folio-contacts.csv');
+    }
+
     const scanTab = document.getElementById('scanTab');
     const contactsTab = document.getElementById('contactsTab');
     const networkTab = document.getElementById('networkTab');
@@ -80,18 +360,28 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Chat state
     let chatHistory = [];
+    const chatWelcome = document.getElementById('chatWelcome');
+    const chatSendBtn = document.getElementById('chatSendBtn');
 
-    // Chat functions
+    function hideChatWelcome() {
+        if (chatWelcome) chatWelcome.classList.add('is-hidden');
+    }
+
     function addMessage(message, isUser = false) {
+        hideChatWelcome();
         const messageDiv = document.createElement('div');
-        messageDiv.className = `flex ${isUser ? 'justify-end' : 'justify-start'}`;
-        
+        messageDiv.className = `chat-row ${isUser ? 'chat-row--user' : 'chat-row--ai'}`;
+
+        if (!isUser) {
+            const avatar = document.createElement('div');
+            avatar.className = 'chat-row__avatar';
+            avatar.innerHTML = '<img src="assets/mascot-chat.svg" alt="">';
+            messageDiv.appendChild(avatar);
+        }
+
         const messageContent = document.createElement('div');
-        messageContent.className = `max-w-[80%] rounded-lg p-3 ${
-            isUser ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-800'
-        }`;
-        
-        // Convert \n to <br> for AI responses
+        messageContent.className = `chat-bubble ${isUser ? 'chat-bubble--user' : 'chat-bubble--ai'}`;
+
         if (!isUser) {
             messageContent.innerHTML = message.replace(/\n/g, '<br>');
         } else {
@@ -99,49 +389,56 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         messageDiv.appendChild(messageContent);
         chatMessages.appendChild(messageDiv);
-        
-        // Scroll to bottom
         chatMessages.scrollTop = chatMessages.scrollHeight;
-        
-        // Add to history
         chatHistory.push({ message, isUser });
     }
 
     function showChat() {
         chatWindow.classList.remove('hidden');
-        chatButton.classList.add('hidden');
+        chatButton.classList.add('tab-active');
+        [scanTab, contactsTab, networkTab].forEach(t => t.classList.remove('tab-active'));
+        myCardBtn?.classList.remove('is-active');
+        setNavCurrent(chatButton);
+        if (typeof pulseNavIcon === 'function') pulseNavIcon(chatButton);
         chatInput.focus();
-        
-        // Add welcome message if chat is empty
-        if (chatHistory.length === 0) {
-            addMessage("Hello! I'm your Contact Database Assistant. I can help you analyze your contacts, find specific information, and provide insights about your network. What would you like to know?");
+
+        if (chatHistory.length === 0 && chatWelcome) {
+            chatWelcome.classList.remove('is-hidden');
+            chatMessages.innerHTML = '';
         }
     }
 
     function hideChat() {
         chatWindow.classList.add('hidden');
-        chatButton.classList.remove('hidden');
+        chatButton.classList.remove('tab-active');
+        if (!scanContent.classList.contains('hidden')) {
+            scanTab.classList.add('tab-active');
+            setNavCurrent(scanTab);
+        } else if (!contactsContent.classList.contains('hidden')) {
+            contactsTab.classList.add('tab-active');
+            setNavCurrent(contactsTab);
+        } else if (!networkContent.classList.contains('hidden')) {
+            networkTab.classList.add('tab-active');
+            setNavCurrent(networkTab);
+        } else if (myCardContent && !myCardContent.classList.contains('hidden')) {
+            myCardBtn?.classList.add('is-active');
+        }
     }
 
     async function handleChatMessage(message) {
         try {
-            // Show typing indicator
             const typingDiv = document.createElement('div');
             typingDiv.id = 'aiTypingIndicator';
-            typingDiv.className = 'flex justify-start';
+            typingDiv.className = 'chat-row chat-row--ai';
             typingDiv.innerHTML = `
-                <div class="bg-gray-100 rounded-lg p-3">
-                    <div class="flex space-x-2">
-                        <div class="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
-                        <div class="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style="animation-delay: 0.2s"></div>
-                        <div class="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style="animation-delay: 0.4s"></div>
-                    </div>
+                <div class="chat-row__avatar"><img src="assets/mascot-chat.svg" alt=""></div>
+                <div class="chat-typing" aria-label="Folio is typing">
+                    <span></span><span></span><span></span>
                 </div>
             `;
             chatMessages.appendChild(typingDiv);
             chatMessages.scrollTop = chatMessages.scrollHeight;
 
-            // Process the message with DeepSeek
             const response = await fetch(`${API_URL}/chat`, {
                 method: 'POST',
                 headers: {
@@ -155,21 +452,16 @@ document.addEventListener('DOMContentLoaded', () => {
             });
 
             if (!response.ok) {
-                // Remove typing indicator before throwing error
                 const typingIndicator = document.getElementById('aiTypingIndicator');
                 if (typingIndicator) typingIndicator.remove();
                 throw new Error('Failed to get response from chat service');
             }
 
             const data = await response.json();
-
-            // Remove typing indicator after receiving response
             const typingIndicator = document.getElementById('aiTypingIndicator');
             if (typingIndicator) typingIndicator.remove();
-
             addMessage(data.response);
         } catch (error) {
-            // Remove typing indicator if error occurs
             const typingIndicator = document.getElementById('aiTypingIndicator');
             if (typingIndicator) typingIndicator.remove();
             console.error('Error handling chat message:', error);
@@ -180,17 +472,30 @@ document.addEventListener('DOMContentLoaded', () => {
     // Chat event listeners
     chatButton.addEventListener('click', showChat);
     closeChat.addEventListener('click', hideChat);
-    
+
+    document.querySelectorAll('.chat-chip').forEach(chip => {
+        chip.addEventListener('click', () => {
+            const prompt = chip.getAttribute('data-prompt');
+            if (!prompt) return;
+            chatInput.value = prompt;
+            chatForm.requestSubmit();
+        });
+    });
+
     chatForm.addEventListener('submit', async (e) => {
         e.preventDefault();
         const message = chatInput.value.trim();
         if (!message) return;
 
-        // Add user message
+        if (chatSendBtn && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+            chatSendBtn.classList.remove('is-sending');
+            void chatSendBtn.offsetWidth;
+            chatSendBtn.classList.add('is-sending');
+            window.setTimeout(() => chatSendBtn.classList.remove('is-sending'), 560);
+        }
+
         addMessage(message, true);
         chatInput.value = '';
-
-        // Handle the message
         await handleChatMessage(message);
     });
 
@@ -228,38 +533,62 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Toast notification function
     function showToast(message, type = 'error') {
-        // Create toast element if it doesn't exist
         let toast = document.getElementById('toast');
         if (!toast) {
             toast = document.createElement('div');
             toast.id = 'toast';
-            toast.className = 'fixed bottom-4 right-4 px-4 py-2 rounded-lg shadow-lg transform transition-transform duration-300 ease-in-out z-50 hidden';
             document.body.appendChild(toast);
         }
-        
-        // Set toast style based on type
-        if (type === 'error') {
-            toast.className = toast.className.replace(/bg-\w+-\d+/g, '') + ' bg-red-500 text-white';
-        } else if (type === 'success') {
-            toast.className = toast.className.replace(/bg-\w+-\d+/g, '') + ' bg-green-500 text-white';
-        } else {
-            toast.className = toast.className.replace(/bg-\w+-\d+/g, '') + ' bg-blue-500 text-white';
-        }
-        
-        // Set message and show toast
+
+        toast.style.background = type === 'success' ? 'var(--success)'
+            : type === 'warning' ? 'var(--copper)'
+            : 'var(--ink)';
+        toast.style.color = type === 'warning' ? 'var(--ink)' : '#fff';
         toast.textContent = message;
         toast.classList.remove('hidden');
-        toast.classList.add('transform', 'translate-y-0');
-        
-        // Hide toast after 3 seconds
+
         setTimeout(() => {
             toast.classList.add('hidden');
-            toast.classList.remove('transform', 'translate-y-0');
         }, 3000);
+    }
+
+    function setUploadShimmer(active) {
+        const shimmer = document.getElementById('uploadShimmer');
+        const mascot = document.getElementById('scanMascot');
+        const mascotLive = document.getElementById('scanMascotLive');
+        if (shimmer) shimmer.classList.toggle('is-active', !!active);
+        const src = active ? 'assets/mascot-scanning.svg' : 'assets/mascot-idle.svg';
+        if (mascot) mascot.src = src;
+        if (mascotLive) mascotLive.src = src;
+    }
+
+    function celebrateScanSuccess() {
+        if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+        const burst = document.createElement('div');
+        burst.className = 'celebration-burst';
+        const colors = ['#c4a574', '#1b2a4a', '#e8ecf4', '#f3eadc', '#067647'];
+        for (let i = 0; i < 18; i++) {
+            const speck = document.createElement('span');
+            speck.style.left = `${20 + Math.random() * 60}%`;
+            speck.style.top = `${55 + Math.random() * 25}%`;
+            speck.style.background = colors[i % colors.length];
+            speck.style.animationDelay = `${Math.random() * 120}ms`;
+            burst.appendChild(speck);
+        }
+        document.body.appendChild(burst);
+        setTimeout(() => burst.remove(), 1000);
+        const mascot = document.getElementById('scanMascot');
+        const mascotLive = document.getElementById('scanMascotLive');
+        if (mascot) mascot.src = 'assets/mascot-success.svg';
+        if (mascotLive) mascotLive.src = 'assets/mascot-success.svg';
     }
 
     // Authentication Functions
     async function isAuthenticated() {
+        if (AUTH_DISABLED) {
+            userId = TEMP_USER_ID;
+            return true;
+        }
         return new Promise((resolve) => {
             const cognitoUser = userPool.getCurrentUser();
             if (cognitoUser) {
@@ -278,6 +607,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function showSignInModal() {
+        if (AUTH_DISABLED) return;
         signInModal.classList.remove('hidden');
         signInError.classList.add('hidden');
     }
@@ -286,29 +616,69 @@ document.addEventListener('DOMContentLoaded', () => {
         signInModal.classList.add('hidden');
     }
 
+    function setNavCurrent(activeBtn) {
+        [scanTab, contactsTab, networkTab, chatButton].forEach((t) => {
+            if (!t) return;
+            if (t === activeBtn) t.setAttribute('aria-current', 'page');
+            else t.removeAttribute('aria-current');
+        });
+    }
+
+    function pulseNavIcon(button) {
+        if (!button || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+        button.classList.remove('nav-tap');
+        // Force reflow so the animation can restart on repeated clicks
+        void button.offsetWidth;
+        button.classList.add('nav-tap');
+        const icon = button.querySelector('.pill-nav__icon');
+        if (icon) {
+            icon.classList.remove('nav-icon-bounce');
+            void icon.offsetWidth;
+            icon.classList.add('nav-icon-bounce');
+        }
+        window.clearTimeout(button._navTapTimer);
+        button._navTapTimer = window.setTimeout(() => {
+            button.classList.remove('nav-tap');
+            if (icon) icon.classList.remove('nav-icon-bounce');
+        }, 700);
+    }
+
     // Tab Switching with Authentication
     async function switchToTab(tab) {
         if (await isAuthenticated()) {
+            hideChat();
+            document.body.classList.remove('is-public-card');
             // First, update UI immediately to show the selected tab content
             [scanTab, contactsTab, networkTab].forEach(t => t.classList.remove('tab-active'));
-            [scanContent, contactsContent, networkContent].forEach(c => c.classList.add('hidden'));
+            myCardBtn?.classList.remove('is-active');
+            [scanContent, contactsContent, networkContent, myCardContent, publicCardContent].forEach(c => {
+                if (!c) return;
+                c.classList.add('hidden');
+                c.classList.remove('fade-in');
+            });
             
             // Show the selected tab content immediately
             if (tab === 'scan') {
                 scanTab.classList.add('tab-active');
+                pulseNavIcon(scanTab);
+                setNavCurrent(scanTab);
                 scanContent.classList.remove('hidden');
+                scanContent.classList.add('fade-in');
                 
                 // Show a loading placeholder if needed
                 if (thumbnailGallery && thumbnailGallery.children.length === 0) {
-                    thumbnailGallery.innerHTML = '<div class="text-center py-4">Ready to scan business cards</div>';
+                    thumbnailGallery.innerHTML = '';
                 }
             } else if (tab === 'contacts') {
                 contactsTab.classList.add('tab-active');
+                pulseNavIcon(contactsTab);
+                setNavCurrent(contactsTab);
                 contactsContent.classList.remove('hidden');
+                contactsContent.classList.add('fade-in');
                 
                 // Show loading state if no contacts are loaded yet
                 if (contactsList && contactsData.length === 0) {
-                    contactsList.innerHTML = '<div class="text-center py-8"><div class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900 mb-4"></div><p>Loading contacts...</p></div>';
+                    contactsList.innerHTML = '<div class="empty-state"><div class="speech-bubble">Fetching your cards…</div><p>Loading contacts...</p></div>';
                     noContacts.classList.add('hidden');
                 } else {
                     // Apply current filters to existing data
@@ -316,7 +686,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             } else if (tab === 'network') {
                 networkTab.classList.add('tab-active');
+                pulseNavIcon(networkTab);
+                setNavCurrent(networkTab);
                 networkContent.classList.remove('hidden');
+                networkContent.classList.add('fade-in');
                 
                 // Always refresh network visualizations when switching to the network tab
                 if (contactsData.length > 0) {
@@ -324,8 +697,16 @@ document.addEventListener('DOMContentLoaded', () => {
                     updateNetworkAnalytics();
                 } else {
                     // Show loading state in network visualization area if needed
-                    networkGraph.innerHTML = '<div class="flex items-center justify-center h-full"><div class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900 mb-4 mr-2"></div><p>Loading network data...</p></div>';
+                    networkGraph.innerHTML = '<div class="empty-state" style="box-shadow:none;background:transparent;"><p>Loading network…</p></div>';
                 }
+            } else if (tab === 'mycard') {
+                myCardBtn?.classList.add('is-active');
+                setNavCurrent(null);
+                if (myCardContent) {
+                    myCardContent.classList.remove('hidden');
+                    myCardContent.classList.add('fade-in');
+                }
+                if (typeof hydrateMyCardStudio === 'function') hydrateMyCardStudio();
             }
             
             // Then, load data asynchronously if needed
@@ -372,9 +753,54 @@ document.addEventListener('DOMContentLoaded', () => {
         filterAndSortContacts();
     });
 
+    if (filterByTag) {
+        filterByTag.addEventListener('change', () => {
+            filterAndSortContacts();
+        });
+    }
+
+    if (filterFollowUp) {
+        filterFollowUp.addEventListener('change', () => {
+            filterAndSortContacts();
+        });
+    }
+
     sortContacts.addEventListener('change', () => {
         filterAndSortContacts();
     });
+
+    function updateTagFilterOptions() {
+        if (!filterByTag) return;
+        const uniqueTags = new Set();
+        contactsData.forEach((c) => {
+            (Array.isArray(c.tags) ? c.tags : parseTagsInput(c.tags)).forEach((tag) => uniqueTags.add(tag));
+        });
+        const currentValue = filterByTag.value;
+        while (filterByTag.options.length > 1) {
+            filterByTag.remove(1);
+        }
+        Array.from(uniqueTags).sort((a, b) => a.localeCompare(b)).forEach((tag) => {
+            const option = document.createElement('option');
+            option.value = tag;
+            option.textContent = tag;
+            filterByTag.appendChild(option);
+        });
+        if (currentValue && uniqueTags.has(currentValue)) {
+            filterByTag.value = currentValue;
+        }
+    }
+
+    function updateFollowUpHint() {
+        if (!followUpHint) return;
+        const overdueCount = contactsData.filter((c) => getFollowUpStatus(c.followUpDate) === 'overdue').length;
+        if (overdueCount > 0) {
+            followUpHint.textContent = `${overdueCount} follow-up${overdueCount === 1 ? '' : 's'} overdue`;
+            followUpHint.classList.remove('hidden');
+        } else {
+            followUpHint.textContent = '';
+            followUpHint.classList.add('hidden');
+        }
+    }
 
     function filterAndSortContacts() {
         if (!contactsData || !Array.isArray(contactsData)) {
@@ -385,6 +811,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const searchTerm = searchContacts.value.toLowerCase();
         const sortValue = sortContacts.value;
         const selectedIndustry = filterByIndustry.value;
+        const selectedTag = filterByTag ? filterByTag.value : '';
+        const selectedFollowUp = filterFollowUp ? filterFollowUp.value : '';
         
         // Filter contacts based on search term and industry using the locally stored contactsData
         let filteredContacts = contactsData.filter(contact => {
@@ -395,8 +823,21 @@ document.addEventListener('DOMContentLoaded', () => {
             if (selectedIndustry && contact.industry !== selectedIndustry) {
                 return false;
             }
+
+            const tags = Array.isArray(contact.tags) ? contact.tags : parseTagsInput(contact.tags);
+            if (selectedTag && !tags.includes(selectedTag)) {
+                return false;
+            }
+
+            if (selectedFollowUp) {
+                const status = getFollowUpStatus(contact.followUpDate);
+                if (selectedFollowUp === 'hasReminder' && !contact.followUpDate) return false;
+                if (selectedFollowUp === 'overdue' && status !== 'overdue') return false;
+                if (selectedFollowUp === 'dueSoon' && status !== 'dueSoon') return false;
+            }
             
             // Search across all text fields
+            const tagHaystack = tags.join(' ').toLowerCase();
             return (
                 (contact.name && contact.name.toLowerCase().includes(searchTerm)) ||
                 (contact.company && contact.company.toLowerCase().includes(searchTerm)) ||
@@ -404,7 +845,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 (contact.email && contact.email.toLowerCase().includes(searchTerm)) ||
                 (contact.phone && contact.phone.toLowerCase().includes(searchTerm)) ||
                 (contact.address && contact.address.toLowerCase().includes(searchTerm)) ||
-                (contact.website && contact.website.toLowerCase().includes(searchTerm))
+                (contact.website && contact.website.toLowerCase().includes(searchTerm)) ||
+                (contact.industry && contact.industry.toLowerCase().includes(searchTerm)) ||
+                (contact.notes && contact.notes.toLowerCase().includes(searchTerm)) ||
+                tagHaystack.includes(searchTerm)
             );
         });
         
@@ -427,6 +871,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     return 0;
             }
         });
+
+        updateFollowUpHint();
         
         // Update the UI with filtered and sorted contacts
         updateContactsList(filteredContacts);
@@ -456,61 +902,41 @@ document.addEventListener('DOMContentLoaded', () => {
         
         noContacts.classList.add('hidden');
         contactsList.innerHTML = `
-        <div class="grid gap-6"
-             style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); width: 100%;">
-            ${contacts.map(contact => `
-                <div class="contact-card bg-white rounded-lg shadow-md overflow-hidden flex flex-col h-full">
-                    <div class="p-4 flex-1 flex flex-col">
-                        <div class="flex items-start mb-2">
-                            ${contact.cachedImageUrl ? 
-                                `<div class="mr-4 w-16 h-16 flex-shrink-0">
-                                    <img src="${contact.cachedImageUrl}" 
-                                         alt="${contact.name || 'Contact'}" 
-                                         class="w-full h-full object-cover rounded cursor-pointer thumbnail-image"
-                                         data-card-id="${contact.cardId}"
-                                         loading="lazy">
-                                </div>` 
-                                : ''
-                            }
-                            <div class="flex-1 min-w-0">
-                                <h3 class="text-lg font-semibold text-gray-900 truncate">${contact.name || 'Unnamed Contact'}</h3>
-                                <p class="text-sm text-gray-600">${contact.title || ''}</p>
-                                <p class="text-sm font-medium text-gray-800">${contact.company || ''}</p>
+        <div class="contact-list">
+            ${contacts.map(contact => {
+                const tags = Array.isArray(contact.tags) ? contact.tags : parseTagsInput(contact.tags);
+                const followLabel = formatFollowUpLabel(contact.followUpDate);
+                const followStatus = getFollowUpStatus(contact.followUpDate);
+                return `
+                <div class="contact-card">
+                    <div class="contact-card__inner">
+                        ${contact.cachedImageUrl
+                            ? `<img src="${contact.cachedImageUrl}" alt="${escapeHtml(contact.name || 'Contact')}" class="contact-card__avatar thumbnail-image" data-card-id="${contact.cardId}" loading="lazy">`
+                            : `<div class="contact-card__avatar" aria-hidden="true"></div>`
+                        }
+                        <div class="contact-card__body">
+                            <h3>${escapeHtml(contact.name || 'Unnamed Contact')}</h3>
+                            <p class="contact-card__meta">${escapeHtml([contact.title, contact.company].filter(Boolean).join(' · '))}</p>
+                            <div class="contact-card__details">
+                                ${contact.email ? `<span>${escapeHtml(contact.email)}</span>` : ''}
+                                ${contact.phone ? `<span>${escapeHtml(contact.phone)}</span>` : ''}
                             </div>
-                        </div>
-                        <div class="space-y-2 mb-4">
-                            ${contact.email ? `<p class="text-sm"><span class="font-medium">Email:</span> ${contact.email}</p>` : ''}
-                            ${contact.phone ? `<p class="text-sm"><span class="font-medium">Phone:</span> ${contact.phone}</p>` : ''}
-                            ${contact.website ? `<p class="text-sm"><span class="font-medium">Website:</span> ${contact.website}</p>` : ''}
-                            ${contact.address ? `<p class="text-sm"><span class="font-medium">Address:</span> ${contact.address}</p>` : ''}
-                        </div>
-                        <div class="mt-auto flex justify-end space-x-2">
-                            <button 
-                                class="download-vcard-btn px-2 py-1 bg-gray-200 text-gray-700 rounded hover:bg-gray-300 text-sm flex items-center"
-                                type="button"
-                                data-card-id="${contact.cardId}"
-                                title="Download vCard"
-                                aria-label="Download vCard">
-                                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v12m0 0l-4-4m4 4l4-4m-4 4V4" />
-                                </svg>
-                            </button>
-                            <button 
-                                class="edit-contact-btn px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm" 
-                                type="button"
-                                data-card-id="${contact.cardId}">
-                                Edit
-                            </button>
-                            <button 
-                                class="delete-contact-btn px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700 text-sm" 
-                                type="button"
-                                data-card-id="${contact.cardId}">
-                                Delete
-                            </button>
+                            ${(tags.length || followLabel) ? `
+                            <div class="contact-card__extras">
+                                ${followLabel ? `<span class="due-badge due-badge--${followStatus || 'upcoming'}">${escapeHtml(followLabel)}</span>` : ''}
+                                ${tags.map((tag) => `<span class="tag-chip">${escapeHtml(tag)}</span>`).join('')}
+                            </div>` : ''}
+                            <div class="contact-card__actions">
+                                <button class="download-vcard-btn chip-btn" type="button" data-card-id="${contact.cardId}" title="Download vCard" aria-label="Download vCard">Save</button>
+                                <button class="share-contact-btn chip-btn" type="button" data-card-id="${contact.cardId}">Share</button>
+                                <button class="copy-contact-btn chip-btn" type="button" data-card-id="${contact.cardId}">Copy</button>
+                                <button class="edit-contact-btn chip-btn chip-btn--accent" type="button" data-card-id="${contact.cardId}">Edit</button>
+                                <button class="delete-contact-btn chip-btn chip-btn--danger" type="button" data-card-id="${contact.cardId}">Delete</button>
+                            </div>
                         </div>
                     </div>
                 </div>
-            `).join('')}
+            `}).join('')}
         </div>
     `;
 
@@ -557,19 +983,50 @@ document.addEventListener('DOMContentLoaded', () => {
                     const response = await fetch(`${API_URL}/vcard/${cardId}?userId=${encodeURIComponent(userId)}`);
                     if (!response.ok) throw new Error('Failed to download vCard');
                     const vcardContent = await response.text();
-                    const filename = `contact_${cardId}.vcf`;
-                    const blob = new Blob([vcardContent], { type: 'text/vcard' });
-                    const url = window.URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = filename;
-                    document.body.appendChild(a);
-                    a.click();
-                    window.URL.revokeObjectURL(url);
-                    document.body.removeChild(a);
+                    const contact = contactsData.find(c => c.cardId === cardId);
+                    const filename = `${(contact?.name || 'contact').replace(/[^\w.-]+/g, '_')}.vcf`;
+                    downloadBlob(new Blob([vcardContent], { type: 'text/vcard' }), filename);
                     showToast('vCard downloaded', 'success');
                 } catch (err) {
                     showToast('Failed to download vCard', 'error');
+                }
+            });
+        });
+
+        document.querySelectorAll('.share-contact-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const cardId = btn.dataset.cardId;
+                const contact = contactsData.find(c => c.cardId === cardId);
+                if (!contact || !userId) {
+                    showToast('Unable to share contact', 'error');
+                    return;
+                }
+                try {
+                    let vcardContent = '';
+                    try {
+                        const response = await fetch(`${API_URL}/vcard/${cardId}?userId=${encodeURIComponent(userId)}`);
+                        if (response.ok) vcardContent = await response.text();
+                    } catch (e) { /* fall through to client vCard */ }
+                    if (!vcardContent) vcardContent = buildVCard(contact);
+                    const result = await shareVCardContent(vcardContent, contact);
+                    if (result === 'fallback') showToast('Contact copied and downloaded', 'success');
+                    else if (result !== 'aborted') showToast('Contact shared', 'success');
+                } catch (err) {
+                    showToast('Failed to share contact', 'error');
+                }
+            });
+        });
+
+        document.querySelectorAll('.copy-contact-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const cardId = btn.dataset.cardId;
+                const contact = contactsData.find(c => c.cardId === cardId);
+                if (!contact) return;
+                try {
+                    await copyTextToClipboard(contactShareText(contact));
+                    showToast('Copied to clipboard', 'success');
+                } catch (err) {
+                    showToast('Clipboard blocked — select and copy manually', 'warning');
                 }
             });
         });
@@ -582,6 +1039,11 @@ document.addEventListener('DOMContentLoaded', () => {
         uploadProgress.textContent = '';
         thumbnailGallery.innerHTML = '';
         scanCompleteMessage.classList.add('hidden');
+        setUploadShimmer(false);
+        const mascot = document.getElementById('scanMascot');
+        const mascotLive = document.getElementById('scanMascotLive');
+        if (mascot) mascot.src = 'assets/mascot-idle.svg';
+        if (mascotLive) mascotLive.src = 'assets/mascot-idle.svg';
     });
 
     // Update createThumbnail function
@@ -624,6 +1086,50 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Process Single Business Card File
+    async function compressImageFile(file, maxDim = 1400, quality = 0.72) {
+        const dataUrl = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = () => reject(new Error('Error reading file'));
+            reader.readAsDataURL(file);
+        });
+        return new Promise((resolve) => {
+            const img = new Image();
+            img.onload = () => {
+                let { width, height } = img;
+                const scale = Math.min(1, maxDim / Math.max(width, height));
+                width = Math.max(1, Math.round(width * scale));
+                height = Math.max(1, Math.round(height * scale));
+                const canvas = document.createElement('canvas');
+                canvas.width = width;
+                canvas.height = height;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0, width, height);
+                resolve(canvas.toDataURL('image/jpeg', quality));
+            };
+            img.onerror = () => resolve(dataUrl);
+            img.src = dataUrl;
+        });
+    }
+
+    async function ocrImageFile(source) {
+        if (typeof Tesseract === 'undefined' || !Tesseract.recognize) return '';
+        try {
+            const result = await Promise.race([
+                Tesseract.recognize(source, 'eng', { logger: () => {} }),
+                new Promise((resolve) => setTimeout(() => resolve(null), 8000)),
+            ]);
+            if (!result) {
+                console.warn('Client OCR timed out; sending image without local text');
+                return '';
+            }
+            return (result?.data?.text || '').trim();
+        } catch (err) {
+            console.warn('Client OCR failed:', err);
+            return '';
+        }
+    }
+
     async function processBusinessCardFile(file) {
         // Add file validation
         if (!file || !file.type.startsWith('image/')) {
@@ -633,47 +1139,43 @@ document.addEventListener('DOMContentLoaded', () => {
             throw new Error('File too large. Maximum size is 5MB.');
         }
 
-        return new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = async (e) => {
-                try {
-                    const imageDataUrl = e.target.result;
-                    const imageBase64 = imageDataUrl.split(',')[1];
+        const imageDataUrl = await compressImageFile(file);
+        const imageBase64 = imageDataUrl.split(',')[1];
+        // Live camera stills skip local OCR so capture cannot hang the UI;
+        // uploads still try a short Tesseract pass for better field extraction.
+        const fromCamera = /^folio-card-/i.test(file.name || '');
+        const rawText = fromCamera ? '' : await ocrImageFile(imageDataUrl);
 
-                    console.log('Sending API request for file');
-                    const response = await fetch(`${API_URL}/scan`, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({ 
-                            images: [imageBase64], // Single image per request
-                            userId: userId
-                        })
-                    });
-
-                    if (!response.ok) {
-                        throw new Error(`Failed to process business card: ${response.status} ${response.statusText}`);
-                    }
-
-                    const result = await response.json();
-                    console.log('API Response received:', result);
-                    
-                    // Successfully processed
-                    resolve(result);
-                } catch (error) {
-                    console.error('Error in processBusinessCardFile:', error);
-                    if (processingStatus) processingStatus.textContent = 'Error processing image';
-                    showToast('Failed to process business card', 'error');
-                    reject(error);
-                }
-            };
-            reader.onerror = (error) => {
-                console.error('FileReader error:', error);
-                reject(new Error('Error reading file'));
-            };
-            reader.readAsDataURL(file);
+        console.log('Sending API request for file');
+        const response = await fetch(`${API_URL}/scan`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                images: [imageBase64],
+                rawTexts: [rawText],
+                userId: userId
+            })
         });
+
+        if (!response.ok) {
+            let detail = `${response.status} ${response.statusText}`;
+            try {
+                const errBody = await response.json();
+                if (errBody?.error) detail = errBody.error;
+            } catch (e) { /* ignore */ }
+            throw new Error(`Failed to process business card: ${detail}`);
+        }
+
+        const result = await response.json();
+        console.log('API Response received:', result);
+        const newContacts = result?.contacts || [];
+        if (newContacts.length) {
+            contactsData = [...contactsData, ...newContacts];
+            await cacheContactsSnapshot(contactsData);
+        }
+        return result;
     }
     
     // Function to show original image in a modal
@@ -750,20 +1252,41 @@ document.addEventListener('DOMContentLoaded', () => {
                 showToast('Error loading contacts: Invalid data format', 'error');
                 return;
             }
+            contactsData = contactsData.filter((c) => c && c.cardId !== '__PROFILE__' && c.kind !== 'profile' && c.kind !== 'slug-alias');
+            if (!contactsData.length) {
+                const cached = await loadCachedContactsSnapshot();
+                if (cached && cached.length) {
+                    contactsData = cached.filter((c) => c && c.cardId !== '__PROFILE__' && c.kind !== 'profile' && c.kind !== 'slug-alias');
+                }
+            }
+
+            await cacheContactsSnapshot(contactsData);
+            updateTagFilterOptions();
+            updateFollowUpHint();
             
             // Cache image URLs and create thumbnails for all contacts
             for (const contact of contactsData) {
                 if (contact.imageUrl) {
                     try {
-                        // Store the API URL for fetching the original image
-                        contact.originalImageUrl = `${API_URL}/images/${contact.cardId}?userId=${encodeURIComponent(userId)}`;
+                        if (contact.imageUrl.startsWith('data:') || contact.imageUrl.startsWith('http')) {
+                            contact.originalImageUrl = contact.imageUrl;
+                        } else {
+                            contact.originalImageUrl = `${API_URL}/images/${contact.cardId}?userId=${encodeURIComponent(userId)}`;
+                        }
                         
                         // Check if we already have a cached thumbnail in localStorage
                         const cachedThumbnail = localStorage.getItem(`thumbnail_${contact.cardId}`);
                         
                         if (cachedThumbnail) {
-                            // Use cached thumbnail if available
                             contact.cachedImageUrl = cachedThumbnail;
+            } else if (contact.originalImageUrl && contact.originalImageUrl.startsWith('data:')) {
+                            const thumbnailDataUrl = await createThumbnail(contact.originalImageUrl, 100, 100, 0.5);
+                            try {
+                                localStorage.setItem(`thumbnail_${contact.cardId}`, thumbnailDataUrl);
+                            } catch (e) {
+                                console.warn('Could not cache thumbnail in localStorage:', e);
+                            }
+                            contact.cachedImageUrl = thumbnailDataUrl;
             } else {
                             // Fetch the image and create a thumbnail
                             const imgResponse = await fetch(contact.originalImageUrl);
@@ -813,7 +1336,22 @@ document.addEventListener('DOMContentLoaded', () => {
             updateNetworkAnalytics();
         } catch (error) {
             console.error('Error loading contacts:', error);
-            showToast('Failed to load contacts', 'error');
+            const cached = await loadCachedContactsSnapshot();
+            if (cached && cached.length) {
+                contactsData = cached;
+                updateTagFilterOptions();
+                updateFollowUpHint();
+                filterAndSortContacts();
+                try {
+                    updateNetworkVisualization();
+                    updateNetworkAnalytics();
+                } catch (vizErr) {
+                    console.warn('Offline viz update skipped:', vizErr);
+                }
+                showToast('Offline — showing cached contacts', 'warning');
+            } else {
+                showToast('Failed to load contacts', 'error');
+            }
         } finally {
             isLoadingContacts = false;
         }
@@ -856,13 +1394,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Defensive: Ensure all fields exist and are strings
         try {
+            document.getElementById('editCardId').value = contact.cardId || '';
             document.getElementById('editName').value = contact.name || '';
             document.getElementById('editTitle').value = contact.title || '';
             document.getElementById('editCompany').value = contact.company || '';
+            document.getElementById('editDepartment').value = contact.department || '';
+            document.getElementById('editIndustry').value = contact.industry || '';
             document.getElementById('editEmail').value = contact.email || '';
             document.getElementById('editPhone').value = contact.phone || '';
             document.getElementById('editWebsite').value = contact.website || '';
             document.getElementById('editAddress').value = contact.address || '';
+            document.getElementById('editTags').value = (Array.isArray(contact.tags) ? contact.tags : parseTagsInput(contact.tags)).join(', ');
+            document.getElementById('editNotes').value = contact.notes || '';
+            document.getElementById('editFollowUpDate').value = contact.followUpDate || '';
+            const dateAdded = contact.dateAdded ? String(contact.dateAdded).slice(0, 10) : '';
+            document.getElementById('editDateAdded').value = dateAdded;
         } catch (err) {
             console.error('showEditContactModal: Error setting input values', err, contact);
             showToast('Error populating edit modal fields');
@@ -924,6 +1470,9 @@ document.addEventListener('DOMContentLoaded', () => {
             phone: document.getElementById('editPhone').value,
             website: document.getElementById('editWebsite').value,
             address: document.getElementById('editAddress').value,
+            notes: document.getElementById('editNotes').value,
+            tags: parseTagsInput(document.getElementById('editTags').value),
+            followUpDate: document.getElementById('editFollowUpDate').value || '',
             dateAdded: document.getElementById('editDateAdded').value
         };
         
@@ -947,6 +1496,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (index !== -1) {
                 contactsData[index] = updatedContact;
             }
+
+            await cacheContactsSnapshot(contactsData);
+            updateTagFilterOptions();
             
             // Close modal and update UI and visualizations
             hideEditContactModal();
@@ -1456,6 +2008,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (currentValue && uniqueIndustries.has(currentValue)) {
             industryFilter.value = currentValue;
         }
+
+        updateTagFilterOptions();
+        updateFollowUpHint();
         
         // Unique companies
         const uniqueCompanies = new Set(contactsData.filter(c => c.company).map(c => c.company)).size || 0;
@@ -2151,8 +2706,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const authenticated = await isAuthenticated();
             
             if (authenticated) {
-                // User is authenticated, show sign out button
-            signOutBtn.classList.remove('hidden');
+                // User is authenticated, show sign out button (hidden while auth is disabled)
+                if (!AUTH_DISABLED) {
+                    signOutBtn.classList.remove('hidden');
+                }
+                hideSignInModal();
                 
                 // Show the default tab content immediately
                 scanTab.classList.add('tab-active');
@@ -2211,6 +2769,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Clear local contacts data
             contactsData = [];
+            await cacheContactsSnapshot([]);
             
             // Update UI and visualizations
             refreshAllVisualizations();
@@ -2238,24 +2797,19 @@ document.addEventListener('DOMContentLoaded', () => {
     // Add delete confirmation modal HTML after the deleteAllModal
     const deleteContactModal = document.createElement('div');
     deleteContactModal.id = 'deleteContactModal';
-    deleteContactModal.className = 'fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full hidden z-50';
+    deleteContactModal.className = 'modal-overlay hidden';
     deleteContactModal.innerHTML = `
-        <div class="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
-            <div class="mt-3 text-center">
-                <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-red-100">
-                    <svg class="h-6 w-6 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
-                </div>
-                <h3 class="text-lg leading-6 font-medium text-gray-900 mt-4">Delete Contact</h3>
-                <div class="mt-2 px-7 py-3">
-                    <p class="text-sm text-gray-500">Are you sure you want to delete this contact? This action cannot be undone.</p>
-                </div>
-                <div class="items-center px-4 py-3">
-                    <button id="confirmDeleteContact" class="px-4 py-2 bg-red-600 text-white text-base font-medium rounded-md w-full shadow-sm hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500">
-                        Delete
-                    </button>
-                    <button id="cancelDeleteContact" class="mt-3 px-4 py-2 bg-gray-100 text-gray-700 text-base font-medium rounded-md w-full shadow-sm hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-500">
-                        Cancel
+        <div class="modal-content sheet">
+            <div class="sheet-body" style="text-align:center;">
+                <h3 style="margin-bottom:8px;">Delete Contact</h3>
+                <p style="color:var(--muted);margin:0 0 20px;">Are you sure you want to delete this contact? This cannot be undone.</p>
+                <div style="display:flex;gap:10px;">
+                    <button id="cancelDeleteContact" class="btn-secondary" style="flex:1;" type="button">Cancel</button>
+                    <button id="confirmDeleteContact" class="btn-luxury btn-luxury--danger" style="flex:1.2;" type="button">
+                        <span class="btn-luxury__disc">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                        </span>
+                        <span>Delete</span>
                     </button>
                 </div>
             </div>
@@ -2338,6 +2892,17 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // Download All Button Event Listener
+    if (exportCsvBtn) {
+        exportCsvBtn.addEventListener('click', () => {
+            if (!contactsData.length) {
+                showToast('No contacts to export', 'warning');
+                return;
+            }
+            exportContactsCsv(contactsData);
+            showToast('CSV exported', 'success');
+        });
+    }
+
     document.getElementById('downloadAllBtn').addEventListener('click', async () => {
         if (!userId) {
             showToast('Please sign in to download contacts', 'error');
@@ -2478,6 +3043,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 console.log(`Starting to process file ${startIndex + index}`);
                 const result = await processBusinessCardFile(file);
                 results[index] = { success: true, result };
+
+                const newContacts = result?.contacts || (Array.isArray(result) ? result : []);
+                warnIfDuplicates(newContacts);
                 
                 // Update UI immediately after API response
                 console.log(`API success for file ${startIndex + index}`);
@@ -2552,14 +3120,14 @@ document.addEventListener('DOMContentLoaded', () => {
     `;
     document.body.appendChild(uploadConfirmModal);
 
-    // Update file upload handler
-    fileUpload.addEventListener('change', async (event) => {
+    // Shared ingest path for library uploads, drag-drop, and live camera captures
+    async function ingestImageFiles(fileList) {
         if (!await isAuthenticated()) {
             showToast('Please sign in to upload files', 'error');
             return;
         }
 
-        const files = event.target.files;
+        const files = fileList;
         if (!files || files.length === 0) {
             showToast('Please select at least one image file');
             return;
@@ -2623,21 +3191,23 @@ document.addEventListener('DOMContentLoaded', () => {
         resetBtn.classList.remove('hidden');
         uploadProgress.textContent = `Preparing to process ${files.length} images`;
         thumbnailGallery.innerHTML = ''; // Clear existing thumbnails
+        setUploadShimmer(true);
 
         // Create progress tracking elements
         const progressContainer = document.createElement('div');
-        progressContainer.className = 'mt-4 p-4 bg-gray-50 rounded-lg';
+        progressContainer.className = 'panel';
+        progressContainer.style.marginTop = '16px';
         progressContainer.innerHTML = `
-            <div class="flex justify-between mb-2">
-                <span class="text-sm font-medium">Overall Progress</span>
-                <span class="text-sm text-gray-500" id="progressText">0/${files.length}</span>
+            <div style="display:flex;justify-content:space-between;margin-bottom:8px;font-size:0.9rem;font-weight:600;">
+                <span>Progress</span>
+                <span id="progressText" style="color:var(--muted);font-weight:500;">0/${files.length}</span>
             </div>
-            <div class="w-full bg-gray-200 rounded-full h-2.5">
-                <div class="bg-blue-600 h-2.5 rounded-full" id="progressBar" style="width: 0%"></div>
+            <div style="width:100%;background:var(--bg-deep);border-radius:999px;height:8px;overflow:hidden;">
+                <div id="progressBar" style="width:0%;height:100%;background:var(--copper);border-radius:999px;transition:width 0.25s ease;"></div>
             </div>
-            <div class="mt-2 flex justify-between text-sm">
-                <span id="successCount" class="text-green-600">Successful: 0</span>
-                <span id="failureCount" class="text-red-600">Failed: 0</span>
+            <div style="margin-top:10px;display:flex;justify-content:space-between;font-size:0.85rem;">
+                <span id="successCount" style="color:var(--success);">Successful: 0</span>
+                <span id="failureCount" style="color:var(--danger);">Failed: 0</span>
             </div>
         `;
         uploadProgress.parentNode.insertBefore(progressContainer, uploadProgress.nextSibling);
@@ -2703,7 +3273,8 @@ document.addEventListener('DOMContentLoaded', () => {
             
             if (totalSuccess > 0) {
                 scanCompleteMessage.classList.remove('hidden');
-                scanCompleteMessage.className = 'bg-green-50 text-green-700 p-4 rounded-lg mt-6 flex items-center justify-between shadow-sm';
+                scanCompleteMessage.classList.add('success-banner');
+                celebrateScanSuccess();
                 
                 // Reload contacts and refresh visualizations after successful upload
                 await loadContacts();
@@ -2718,9 +3289,14 @@ document.addEventListener('DOMContentLoaded', () => {
             if (processingStatus) processingStatus.textContent = '';
             uploadProgress.textContent = '';
         } finally {
+            setUploadShimmer(false);
             // Reset the file input to allow selecting the same files again if needed
             fileUpload.value = '';
         }
+    }
+
+    fileUpload.addEventListener('change', async (event) => {
+        await ingestImageFiles(event.target.files);
     });
 
     // Helper function to create thumbnail elements
@@ -2840,4 +3416,1170 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
     }
+
+    // Folio full in-panel camera
+    const dropZone = document.getElementById('dropZone');
+    const cameraFlash = document.getElementById('cameraFlash');
+    const cameraPanel = document.getElementById('cameraPanel');
+    const cameraVideo = document.getElementById('cameraVideo');
+    const cameraCanvas = document.getElementById('cameraCanvas');
+    const cameraIdle = document.getElementById('cameraIdle');
+    const cameraLiveUi = document.getElementById('cameraLiveUi');
+    const cameraShutterBtn = document.getElementById('cameraShutterBtn');
+    const cameraCloseBtn = document.getElementById('cameraCloseBtn');
+    const cameraLibraryBtn = document.getElementById('cameraLibraryBtn');
+    const scanMascotLive = document.getElementById('scanMascotLive');
+    let cameraOpenBusy = false;
+    let cameraStream = null;
+    let cameraCapturing = false;
+
+    function getCameraSourceEl(preferred) {
+        if (preferred?.classList?.contains('camera-panel__shutter')) {
+            return preferred;
+        }
+        return preferred || cameraShutterBtn || cameraPanel;
+    }
+
+    function playCameraFlash(sourceEl) {
+        if (!cameraFlash || !sourceEl) return () => {};
+
+        const rect = sourceEl.getBoundingClientRect();
+        const x = rect.left + rect.width / 2;
+        const y = rect.top + rect.height / 2;
+
+        cameraFlash.style.setProperty('--flash-x', `${x}px`);
+        cameraFlash.style.setProperty('--flash-y', `${y}px`);
+
+        cameraFlash.classList.remove('is-on');
+        void cameraFlash.offsetWidth;
+        cameraFlash.classList.add('is-on');
+
+        const pressTarget = sourceEl.closest('.camera-panel__shutter') || sourceEl;
+        pressTarget.classList.add('is-pressing');
+        document.body.classList.add('camera-flashing');
+
+        return () => {
+            cameraFlash.classList.remove('is-on');
+            pressTarget.classList.remove('is-pressing');
+            document.body.classList.remove('camera-flashing');
+            cameraShutterBtn?.classList.remove('is-pressing');
+        };
+    }
+
+    function setMascotSrc(src) {
+        const mascot = document.getElementById('scanMascot');
+        if (mascot) mascot.src = src;
+        if (scanMascotLive) scanMascotLive.src = src;
+    }
+
+    function setCameraLiveUi(isLive) {
+        cameraPanel?.classList.toggle('is-live', isLive);
+        cameraIdle?.classList.toggle('hidden', isLive);
+        cameraLiveUi?.classList.toggle('hidden', !isLive);
+        setMascotSrc(isLive ? 'assets/mascot-scanning.svg' : 'assets/mascot-idle.svg');
+    }
+
+    function stopLiveCamera() {
+        if (cameraStream) {
+            cameraStream.getTracks().forEach((track) => track.stop());
+            cameraStream = null;
+        }
+        if (cameraVideo) {
+            cameraVideo.srcObject = null;
+        }
+        setCameraLiveUi(false);
+    }
+
+    async function requestCameraStream() {
+        const wide = isWideAppLayout();
+        const preferred = {
+            audio: false,
+            video: {
+                facingMode: { ideal: wide ? 'user' : 'environment' },
+                width: { ideal: wide ? 1280 : 1920 },
+                height: { ideal: wide ? 720 : 1080 },
+            },
+        };
+        try {
+            return await navigator.mediaDevices.getUserMedia(preferred);
+        } catch (err) {
+            console.warn('Preferred camera failed, trying any video device', err);
+            return navigator.mediaDevices.getUserMedia({ audio: false, video: true });
+        }
+    }
+
+    async function waitForCameraFrame(video, timeoutMs = 4000) {
+        if (!video) return false;
+        if (video.readyState >= 2 && video.videoWidth > 0) return true;
+        return new Promise((resolve) => {
+            let settled = false;
+            const finish = () => {
+                if (settled) return;
+                settled = true;
+                video.removeEventListener('loadeddata', onReady);
+                video.removeEventListener('loadedmetadata', onReady);
+                clearTimeout(timer);
+                resolve(video.videoWidth > 0);
+            };
+            const onReady = () => {
+                if (video.videoWidth > 0 || video.readyState >= 2) finish();
+            };
+            video.addEventListener('loadeddata', onReady);
+            video.addEventListener('loadedmetadata', onReady);
+            const timer = setTimeout(finish, timeoutMs);
+        });
+    }
+
+    async function startLiveCamera(fromEl, options = {}) {
+        const fallbackToLibrary = options.fallbackToLibrary !== false;
+        if (cameraOpenBusy) return;
+        if (AUTH_DISABLED) {
+            userId = TEMP_USER_ID;
+        } else if (!userId) {
+            showToast('Please sign in to upload files', 'error');
+            showSignInModal();
+            return;
+        }
+
+        if (!navigator.mediaDevices?.getUserMedia) {
+            if (fallbackToLibrary) openPhotoLibrary(fromEl);
+            else showToast('Camera is not supported in this browser', 'error');
+            return;
+        }
+
+        if (cameraStream) {
+            cameraPanel?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            return;
+        }
+
+        cameraOpenBusy = true;
+        try {
+            const wide = isWideAppLayout();
+            cameraStream = await requestCameraStream();
+            const facing = cameraStream.getVideoTracks()[0]?.getSettings?.()?.facingMode || '';
+            cameraPanel?.classList.toggle('is-selfie', facing === 'user' || (wide && facing !== 'environment'));
+            if (cameraVideo) {
+                cameraVideo.setAttribute('playsinline', 'true');
+                cameraVideo.setAttribute('webkit-playsinline', 'true');
+                cameraVideo.muted = true;
+                cameraVideo.style.transform = 'none';
+                cameraVideo.srcObject = cameraStream;
+                await waitForCameraFrame(cameraVideo);
+                await cameraVideo.play().catch((err) => {
+                    console.warn('video.play failed', err);
+                });
+            }
+            setCameraLiveUi(true);
+            cameraPanel?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        } catch (err) {
+            console.warn('Live camera unavailable', err);
+            if (fallbackToLibrary) {
+                showToast('Camera unavailable — opening photo library', 'error');
+                openPhotoLibrary(fromEl);
+            } else {
+                showToast('Could not open the camera. Tap the panel to try again.', 'error');
+            }
+        } finally {
+            cameraOpenBusy = false;
+        }
+    }
+
+    function openPhotoLibrary(fromEl) {
+        if (!fileUpload) return;
+        if (AUTH_DISABLED) {
+            userId = TEMP_USER_ID;
+        } else if (!userId) {
+            showToast('Please sign in to upload files', 'error');
+            showSignInModal();
+            return;
+        }
+        fileUpload.click();
+    }
+
+    async function captureFromLiveCamera() {
+        if (!cameraStream || !cameraVideo || !cameraCanvas || cameraCapturing) return;
+        if (cameraVideo.readyState < 2 || !cameraVideo.videoWidth) {
+            showToast('Camera is still starting…');
+            return;
+        }
+
+        cameraCapturing = true;
+        const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        let cleanup = () => {};
+        if (!reduceMotion) {
+            cleanup = playCameraFlash(cameraShutterBtn || cameraPanel);
+        }
+
+        try {
+            const width = cameraVideo.videoWidth || 1280;
+            const height = cameraVideo.videoHeight || 720;
+            cameraCanvas.width = width;
+            cameraCanvas.height = height;
+            const ctx = cameraCanvas.getContext('2d');
+            // Draw the real camera frame (never mirrored) so OCR can read the card
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.drawImage(cameraVideo, 0, 0, width, height);
+
+            const blob = await new Promise((resolve) => {
+                cameraCanvas.toBlob(resolve, 'image/jpeg', 0.92);
+            });
+            if (!blob) throw new Error('Capture failed');
+
+            const file = new File([blob], `folio-card-${Date.now()}.jpg`, { type: 'image/jpeg' });
+            stopLiveCamera();
+            setMascotSrc('assets/mascot-scanning.svg');
+            await ingestImageFiles([file]);
+        } catch (err) {
+            console.error(err);
+            showToast('Could not capture photo', 'error');
+        } finally {
+            window.setTimeout(() => {
+                cleanup();
+                cameraCapturing = false;
+            }, reduceMotion ? 0 : 420);
+        }
+    }
+
+    cameraShutterBtn?.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        captureFromLiveCamera();
+    });
+    cameraCloseBtn?.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        stopLiveCamera();
+    });
+    cameraLibraryBtn?.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openPhotoLibrary(cameraLibraryBtn);
+    });
+    cameraPanel?.addEventListener('click', (e) => {
+        if (cameraStream) return;
+        if (e.target.closest('button')) return;
+        startLiveCamera(cameraPanel);
+    });
+
+    function isWideAppLayout() {
+        return window.matchMedia('(min-width: 1024px)').matches;
+    }
+
+    function updateScanIdleCopy() {
+        const sub = document.getElementById('cameraIdleSub');
+        if (!sub) return;
+        sub.textContent = isWideAppLayout()
+            ? 'Drop card photos here · or open webcam'
+            : 'Tap to open live camera · frame a card · capture';
+    }
+
+    updateScanIdleCopy();
+    window.matchMedia('(min-width: 1024px)').addEventListener('change', updateScanIdleCopy);
+
+    document.getElementById('desktopWebcamBtn')?.addEventListener('click', (e) => {
+        e.preventDefault();
+        startLiveCamera(e.currentTarget);
+    });
+    document.getElementById('desktopUploadBtn')?.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openPhotoLibrary(e.currentTarget);
+    });
+
+    // Auto-open camera on phones/tablets only — laptops start from drop/upload
+    if (!isWideAppLayout() && !scanContent?.classList.contains('hidden')) {
+        window.setTimeout(() => startLiveCamera(cameraPanel, { fallbackToLibrary: false }), 350);
+    }
+    scanTab?.addEventListener('click', () => {
+        if (isWideAppLayout()) return;
+        window.setTimeout(() => startLiveCamera(cameraPanel, { fallbackToLibrary: false }), 200);
+    });
+
+    let networkResizeTimer = null;
+    window.addEventListener('resize', () => {
+        if (networkContent?.classList.contains('hidden')) return;
+        window.clearTimeout(networkResizeTimer);
+        networkResizeTimer = window.setTimeout(() => {
+            if (typeof updateNetworkVisualization === 'function' && contactsData.length > 1) {
+                updateNetworkVisualization();
+            }
+        }, 250);
+    });
+
+    const stopCameraOnTabLeave = () => stopLiveCamera();
+    contactsTab?.addEventListener('click', stopCameraOnTabLeave);
+    networkTab?.addEventListener('click', stopCameraOnTabLeave);
+    document.getElementById('chatButton')?.addEventListener('click', stopCameraOnTabLeave);
+    window.addEventListener('pagehide', stopLiveCamera);
+
+    if (cameraPanel && fileUpload) {
+        ['dragenter', 'dragover'].forEach(evt => {
+            cameraPanel.addEventListener(evt, (e) => {
+                e.preventDefault();
+                cameraPanel.classList.add('is-dragover');
+            });
+        });
+        ['dragleave', 'drop'].forEach(evt => {
+            cameraPanel.addEventListener(evt, (e) => {
+                e.preventDefault();
+                cameraPanel.classList.remove('is-dragover');
+            });
+        });
+        cameraPanel.addEventListener('drop', (e) => {
+            const files = e.dataTransfer?.files;
+            if (!files?.length) return;
+            const dt = new DataTransfer();
+            Array.from(files).forEach(f => {
+                if (f.type.startsWith('image/')) dt.items.add(f);
+            });
+            if (dt.files.length) {
+                fileUpload.files = dt.files;
+                fileUpload.dispatchEvent(new Event('change'));
+            }
+        });
+    }
+
+    if (dropZone && fileUpload) {
+        ['dragenter', 'dragover'].forEach(evt => {
+            dropZone.addEventListener(evt, (e) => {
+                e.preventDefault();
+                dropZone.classList.add('is-dragover');
+            });
+        });
+        ['dragleave', 'drop'].forEach(evt => {
+            dropZone.addEventListener(evt, (e) => {
+                e.preventDefault();
+                dropZone.classList.remove('is-dragover');
+            });
+        });
+        dropZone.addEventListener('drop', (e) => {
+            const files = e.dataTransfer?.files;
+            if (!files?.length) return;
+            const dt = new DataTransfer();
+            Array.from(files).forEach(f => {
+                if (f.type.startsWith('image/')) dt.items.add(f);
+            });
+            if (dt.files.length) {
+                fileUpload.files = dt.files;
+                fileUpload.dispatchEvent(new Event('change'));
+            }
+        });
+    }
+
+    // ——— My Card studio ———
+    const MY_CARD_FIELD_IDS = [
+        'myCardName', 'myCardTitle', 'myCardCompany', 'myCardBio', 'myCardEmail',
+        'myCardPhone', 'myCardWebsite', 'myCardLinkedin', 'myCardTwitter',
+        'myCardInstagram', 'myCardGithub', 'myCardAddress', 'myCardSlug'
+    ];
+    const LOCK_THEMES = {
+        navy: { top: '#121a2e', bottom: '#1b2a4a', ink: '#faf7f1', accent: '#c4a574', qrDark: '#1b2a4a', qrLight: '#ffffff' },
+        cream: { top: '#f7f3eb', bottom: '#e8e1d4', ink: '#1b2a4a', accent: '#b08d55', qrDark: '#1b2a4a', qrLight: '#ffffff' },
+        midnight: { top: '#070b12', bottom: '#141c2c', ink: '#f4f0e8', accent: '#c4a574', qrDark: '#0e1420', qrLight: '#faf7f1' },
+        copper: { top: '#8a6a3a', bottom: '#c4a574', ink: '#1b2a4a', accent: '#faf7f1', qrDark: '#1b2a4a', qrLight: '#faf7f1' },
+    };
+    let lockTemplate = 'navy';
+    let publicCardData = null;
+    let myCardSyncTimer = null;
+
+    function slugifyCard(value) {
+        return (value || '').toLowerCase().trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+    }
+
+    function cardInitials(name) {
+        const parts = (name || '').trim().split(/\s+/).filter(Boolean);
+        if (!parts.length) return 'F';
+        return ((parts[0][0] || '') + (parts[1] ? parts[1][0] : '')).toUpperCase();
+    }
+
+    function myCardPublicUrl(card) {
+        const slug = slugifyCard(card?.slug || card?.name || userId || TEMP_USER_ID) || (userId || TEMP_USER_ID);
+        return `${window.location.origin}/?card=${encodeURIComponent(slug)}`;
+    }
+
+    function qrPayloadForCard(card) {
+        const mode = document.querySelector('input[name="myCardQrMode"]:checked')?.value || card.qrMode || 'url';
+        if (mode === 'vcard') return buildVCard({ ...card, profileUrl: myCardPublicUrl(card) });
+        return myCardPublicUrl(card);
+    }
+
+    function socialLink(label, href) {
+        const url = normalizeHref(href);
+        if (!url) return '';
+        return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(label)}</a>`;
+    }
+
+    function fillDigitalCard(el, card) {
+        if (!el) return;
+        const theme = card.theme || 'navy';
+        const layout = card.layout || 'classic';
+        el.dataset.theme = theme;
+        el.dataset.layout = layout;
+        el.style.setProperty('--dc-accent', card.accent || '#c4a574');
+        const avatarSrc = (card.avatar || '').startsWith('data:image/') || /^(https?:)/i.test(card.avatar || '')
+            ? card.avatar
+            : '';
+        const avatar = avatarSrc
+            ? `<img class="dc-card__avatar" src="${avatarSrc}" alt="">`
+            : `<div class="dc-card__avatar dc-card__avatar--fallback">${escapeHtml(cardInitials(card.name))}</div>`;
+        const roleLine = [card.title, card.company].filter(Boolean).join(' · ');
+        const contactBits = [
+            card.email ? `<a href="mailto:${escapeHtml(card.email)}">${escapeHtml(card.email)}</a>` : '',
+            card.phone ? `<a href="tel:${escapeHtml(card.phone)}">${escapeHtml(card.phone)}</a>` : '',
+            card.website ? `<a href="${escapeHtml(normalizeHref(card.website))}" target="_blank" rel="noopener">${escapeHtml(card.website)}</a>` : '',
+        ].filter(Boolean).join('');
+        el.innerHTML = `
+            <div class="dc-card__top">
+                ${avatar}
+                <div>
+                    <h3 class="dc-card__name">${escapeHtml(card.name || 'Your name')}</h3>
+                    <p class="dc-card__meta">${escapeHtml(roleLine || 'Title · Company')}</p>
+                </div>
+            </div>
+            ${card.bio ? `<p class="dc-card__bio">${escapeHtml(card.bio)}</p>` : ''}
+            <div class="dc-card__contacts">${contactBits}</div>
+            <div class="dc-card__socials">
+                ${socialLink('LinkedIn', card.linkedin)}
+                ${socialLink('X', card.twitter)}
+                ${socialLink('Instagram', card.instagram)}
+                ${socialLink('GitHub', card.github)}
+            </div>
+        `;
+    }
+
+    function readMyCardForm() {
+        const stored = loadMyCard();
+        return {
+            name: document.getElementById('myCardName')?.value?.trim() || '',
+            title: document.getElementById('myCardTitle')?.value?.trim() || '',
+            company: document.getElementById('myCardCompany')?.value?.trim() || '',
+            bio: document.getElementById('myCardBio')?.value?.trim() || '',
+            email: document.getElementById('myCardEmail')?.value?.trim() || '',
+            phone: document.getElementById('myCardPhone')?.value?.trim() || '',
+            website: document.getElementById('myCardWebsite')?.value?.trim() || '',
+            linkedin: document.getElementById('myCardLinkedin')?.value?.trim() || '',
+            twitter: document.getElementById('myCardTwitter')?.value?.trim() || '',
+            instagram: document.getElementById('myCardInstagram')?.value?.trim() || '',
+            github: document.getElementById('myCardGithub')?.value?.trim() || '',
+            address: document.getElementById('myCardAddress')?.value?.trim() || '',
+            slug: slugifyCard(document.getElementById('myCardSlug')?.value) || '',
+            avatar: stored.avatar || '',
+            theme: stored.theme || 'navy',
+            layout: stored.layout || 'classic',
+            accent: document.getElementById('myCardAccent')?.value || stored.accent || '#c4a574',
+            qrMode: document.querySelector('input[name="myCardQrMode"]:checked')?.value || stored.qrMode || 'url',
+        };
+    }
+
+    function fillMyCardForm(card) {
+        const setVal = (id, value) => {
+            const el = document.getElementById(id);
+            if (el) el.value = value || '';
+        };
+        setVal('myCardName', card.name);
+        setVal('myCardTitle', card.title);
+        setVal('myCardCompany', card.company);
+        setVal('myCardBio', card.bio);
+        setVal('myCardEmail', card.email);
+        setVal('myCardPhone', card.phone);
+        setVal('myCardWebsite', card.website);
+        setVal('myCardLinkedin', card.linkedin);
+        setVal('myCardTwitter', card.twitter);
+        setVal('myCardInstagram', card.instagram);
+        setVal('myCardGithub', card.github);
+        setVal('myCardAddress', card.address);
+        setVal('myCardSlug', card.slug);
+        const accent = document.getElementById('myCardAccent');
+        if (accent) accent.value = card.accent || '#c4a574';
+        const avatarImg = document.getElementById('myCardAvatarImg');
+        const avatarFallback = document.getElementById('myCardAvatarFallback');
+        if (avatarImg && avatarFallback) {
+            if (card.avatar) {
+                avatarImg.src = card.avatar;
+                avatarImg.classList.remove('hidden');
+                avatarFallback.classList.add('hidden');
+            } else {
+                avatarImg.removeAttribute('src');
+                avatarImg.classList.add('hidden');
+                avatarFallback.classList.remove('hidden');
+            }
+        }
+        document.querySelectorAll('#myCardThemeRow [data-theme]').forEach((btn) => {
+            btn.classList.toggle('is-active', btn.dataset.theme === (card.theme || 'navy'));
+        });
+        document.querySelectorAll('#myCardLayoutRow [data-layout]').forEach((btn) => {
+            btn.classList.toggle('is-active', btn.dataset.layout === (card.layout || 'classic'));
+        });
+        const qrMode = card.qrMode === 'vcard' ? 'vcard' : 'url';
+        document.querySelectorAll('input[name="myCardQrMode"]').forEach((input) => {
+            input.checked = input.value === qrMode;
+        });
+        lockTemplate = card.lockTemplate || card.theme || 'navy';
+        document.querySelectorAll('#lockTemplateRow [data-lock-template]').forEach((btn) => {
+            btn.classList.toggle('is-active', btn.dataset.lockTemplate === lockTemplate);
+        });
+    }
+
+    function renderMyCardQr(card, canvasEl) {
+        const canvas = canvasEl || document.getElementById('myCardQrCanvas');
+        if (!canvas || typeof QRCode === 'undefined') return;
+        const payload = qrPayloadForCard(card);
+        if (!card.name && !card.email && !card.phone) {
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = '#5c6578';
+            ctx.font = '12px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Add your details', canvas.width / 2, canvas.height / 2);
+            return;
+        }
+        QRCode.toCanvas(canvas, payload, {
+            width: canvas.width || 220,
+            margin: 1,
+            color: { dark: '#1b2a4a', light: '#ffffff' },
+            errorCorrectionLevel: 'M',
+        }, (err) => {
+            if (err) console.warn('QR render failed', err);
+        });
+    }
+
+    function refreshMyCardPreview() {
+        const card = readMyCardForm();
+        fillDigitalCard(document.getElementById('digitalCardPreview'), card);
+        renderMyCardQr(card);
+        const hint = document.getElementById('myCardSlugHint');
+        const urlLabel = document.getElementById('myCardPublicUrl');
+        const url = myCardPublicUrl(card);
+        if (hint) hint.textContent = `Public link: ${url}`;
+        if (urlLabel) urlLabel.textContent = url;
+        renderLockPreview();
+    }
+
+    function hydrateMyCardStudio() {
+        fillMyCardForm(loadMyCard());
+        refreshMyCardPreview();
+        syncMyCardFromApi();
+    }
+
+    async function syncMyCardFromApi() {
+        if (!userId || !navigator.onLine) return;
+        try {
+            const res = await fetch(`${API_URL}/profile?userId=${encodeURIComponent(userId)}`);
+            if (!res.ok) return;
+            const data = await res.json();
+            if (data?.profile?.name) {
+                const local = loadMyCard();
+                const merged = { ...local, ...data.profile };
+                if (local.avatar && !data.profile.avatar) merged.avatar = local.avatar;
+                saveMyCard(merged);
+                fillMyCardForm(merged);
+                refreshMyCardPreview();
+            }
+        } catch (err) {
+            /* local card is enough until API is deployed */
+        }
+    }
+
+    async function persistMyCard(card, { toast = true } = {}) {
+        if (!card.name) {
+            showToast('Add your name before saving', 'warning');
+            return false;
+        }
+        if (!card.slug) card.slug = slugifyCard(card.name) || slugifyCard(userId);
+        card.lockTemplate = lockTemplate;
+        saveMyCard(card);
+        refreshMyCardPreview();
+        if (navigator.onLine && userId) {
+            try {
+                const res = await fetch(`${API_URL}/profile`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ...card, userId }),
+                });
+                if (res.status === 409) {
+                    showToast('That public link is already taken', 'warning');
+                    return false;
+                }
+            } catch (err) {
+                /* stay on localStorage */
+            }
+        }
+        if (toast) showToast('My Card saved', 'success');
+        return true;
+    }
+
+    async function downloadProfileVcf(card, slug) {
+        const filename = `${(card.name || 'contact').replace(/[^\w.-]+/g, '_')}.vcf`;
+        if (navigator.onLine) {
+            try {
+                if (slug) {
+                    const res = await fetch(`${API_URL}/vcard/profile/${encodeURIComponent(slug)}`);
+                    if (res.ok) {
+                        downloadBlob(new Blob([await res.text()], { type: 'text/vcard' }), filename);
+                        return;
+                    }
+                }
+                const posted = await fetch(`${API_URL}/vcard`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ...card, profileUrl: myCardPublicUrl(card), version: '3.0' }),
+                });
+                if (posted.ok) {
+                    downloadBlob(new Blob([await posted.text()], { type: 'text/vcard' }), filename);
+                    return;
+                }
+            } catch (err) {
+                /* fall through to local generator */
+            }
+        }
+        downloadBlob(new Blob([buildVCard({ ...card, profileUrl: myCardPublicUrl(card) })], { type: 'text/vcard' }), filename);
+    }
+
+    function compressAvatarFile(file) {
+        return new Promise((resolve, reject) => {
+            const img = new Image();
+            const url = URL.createObjectURL(file);
+            img.onload = () => {
+                const size = 512;
+                const canvas = document.createElement('canvas');
+                canvas.width = size;
+                canvas.height = size;
+                const ctx = canvas.getContext('2d');
+                const scale = Math.max(size / img.width, size / img.height);
+                const w = img.width * scale;
+                const h = img.height * scale;
+                ctx.drawImage(img, (size - w) / 2, (size - h) / 2, w, h);
+                URL.revokeObjectURL(url);
+                resolve(canvas.toDataURL('image/jpeg', 0.82));
+            };
+            img.onerror = () => {
+                URL.revokeObjectURL(url);
+                reject(new Error('Could not read photo'));
+            };
+            img.src = url;
+        });
+    }
+
+    function loadImage(src) {
+        return new Promise((resolve) => {
+            if (!src) {
+                resolve(null);
+                return;
+            }
+            const img = new Image();
+            img.onload = () => resolve(img);
+            img.onerror = () => resolve(null);
+            img.src = src;
+        });
+    }
+
+    function qrToCanvas(payload, size, colors) {
+        return new Promise((resolve, reject) => {
+            if (typeof QRCode === 'undefined') {
+                reject(new Error('QR library missing'));
+                return;
+            }
+            const canvas = document.createElement('canvas');
+            QRCode.toCanvas(canvas, payload, {
+                width: size,
+                margin: 1,
+                color: { dark: colors.qrDark, light: colors.qrLight },
+                errorCorrectionLevel: 'M',
+            }, (err) => {
+                if (err) reject(err);
+                else resolve(canvas);
+            });
+        });
+    }
+
+    function roundRectPath(ctx, x, y, w, h, r) {
+        const radius = Math.min(r, w / 2, h / 2);
+        ctx.beginPath();
+        ctx.moveTo(x + radius, y);
+        ctx.arcTo(x + w, y, x + w, y + h, radius);
+        ctx.arcTo(x + w, y + h, x, y + h, radius);
+        ctx.arcTo(x, y + h, x, y, radius);
+        ctx.arcTo(x, y, x + w, y, radius);
+        ctx.closePath();
+    }
+
+    async function drawLockWallpaper(canvas, card, templateKey) {
+        const theme = LOCK_THEMES[templateKey] || LOCK_THEMES.navy;
+        const w = canvas.width;
+        const h = canvas.height;
+        const ctx = canvas.getContext('2d');
+        const grad = ctx.createLinearGradient(0, 0, 0, h);
+        grad.addColorStop(0, theme.top);
+        grad.addColorStop(1, theme.bottom);
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, w, h);
+
+        ctx.fillStyle = theme.accent;
+        ctx.globalAlpha = 0.18;
+        ctx.beginPath();
+        ctx.arc(w * 0.82, h * 0.18, w * 0.38, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+
+        const avatarSize = Math.round(w * 0.28);
+        const avatarY = Math.round(h * 0.18);
+        const avatarX = Math.round((w - avatarSize) / 2);
+        const avatarImg = await loadImage(card.avatar);
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(avatarX + avatarSize / 2, avatarY + avatarSize / 2, avatarSize / 2, 0, Math.PI * 2);
+        ctx.closePath();
+        ctx.clip();
+        if (avatarImg) {
+            ctx.drawImage(avatarImg, avatarX, avatarY, avatarSize, avatarSize);
+        } else {
+            ctx.fillStyle = theme.accent;
+            ctx.fillRect(avatarX, avatarY, avatarSize, avatarSize);
+            ctx.fillStyle = theme.ink;
+            ctx.font = `700 ${Math.round(avatarSize * 0.32)}px Georgia, serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(cardInitials(card.name), avatarX + avatarSize / 2, avatarY + avatarSize / 2 + 4);
+        }
+        ctx.restore();
+        ctx.strokeStyle = theme.accent;
+        ctx.lineWidth = Math.max(4, w * 0.008);
+        ctx.beginPath();
+        ctx.arc(avatarX + avatarSize / 2, avatarY + avatarSize / 2, avatarSize / 2 + ctx.lineWidth, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.fillStyle = theme.ink;
+        ctx.textAlign = 'center';
+        ctx.font = `700 ${Math.round(w * 0.072)}px Georgia, serif`;
+        ctx.fillText(card.name || 'Your name', w / 2, avatarY + avatarSize + Math.round(h * 0.055));
+        ctx.font = `500 ${Math.round(w * 0.032)}px "DM Sans", sans-serif`;
+        ctx.globalAlpha = 0.78;
+        const role = [card.title, card.company].filter(Boolean).join('  ·  ') || 'Add your title';
+        ctx.fillText(role, w / 2, avatarY + avatarSize + Math.round(h * 0.09));
+        ctx.globalAlpha = 1;
+
+        const qrSize = Math.round(w * 0.42);
+        const qrY = Math.round(h * 0.58);
+        const qrX = Math.round((w - qrSize) / 2);
+        try {
+            const qrCanvas = await qrToCanvas(myCardPublicUrl(card), qrSize, theme);
+            const pad = Math.round(qrSize * 0.08);
+            ctx.fillStyle = theme.qrLight;
+            roundRectPath(ctx, qrX - pad / 2, qrY - pad / 2, qrSize + pad, qrSize + pad, 28);
+            ctx.fill();
+            ctx.drawImage(qrCanvas, qrX, qrY, qrSize, qrSize);
+        } catch (err) {
+            console.warn('Lock screen QR failed', err);
+        }
+
+        ctx.fillStyle = theme.ink;
+        ctx.globalAlpha = 0.8;
+        ctx.font = `600 ${Math.round(w * 0.028)}px "DM Sans", sans-serif`;
+        ctx.fillText('Scan to save contact', w / 2, qrY + qrSize + Math.round(h * 0.045));
+        ctx.globalAlpha = 0.45;
+        ctx.font = `600 ${Math.round(w * 0.022)}px Georgia, serif`;
+        ctx.fillText('Folio', w / 2, h - Math.round(h * 0.045));
+        ctx.globalAlpha = 1;
+    }
+
+    async function renderLockPreview() {
+        const preview = document.getElementById('lockPreviewCanvas');
+        if (!preview) return;
+        const card = readMyCardForm();
+        const size = (document.getElementById('lockSizeSelect')?.value || '1080x1920').split('x');
+        const ratio = Number(size[1]) / Number(size[0]);
+        preview.width = 270;
+        preview.height = Math.round(270 * ratio);
+        await drawLockWallpaper(preview, card, lockTemplate);
+    }
+
+    async function downloadLockWallpaper() {
+        const card = readMyCardForm();
+        if (!card.name) {
+            showToast('Add your name before generating a wallpaper', 'warning');
+            return;
+        }
+        const [width, height] = (document.getElementById('lockSizeSelect')?.value || '1080x1920').split('x').map(Number);
+        const full = document.getElementById('lockFullCanvas') || document.createElement('canvas');
+        full.width = width;
+        full.height = height;
+        await drawLockWallpaper(full, card, lockTemplate);
+        const link = document.createElement('a');
+        link.download = `folio-lock-screen-${width}x${height}.png`;
+        link.href = full.toDataURL('image/png');
+        link.click();
+        showToast('Wallpaper saved', 'success');
+    }
+
+    function switchDcTab(tab) {
+        document.querySelectorAll('.dc-tab').forEach((btn) => {
+            const on = btn.dataset.dcTab === tab;
+            btn.classList.toggle('is-active', on);
+            btn.setAttribute('aria-selected', on ? 'true' : 'false');
+        });
+        document.querySelectorAll('.dc-pane').forEach((pane) => {
+            pane.classList.toggle('hidden', pane.dataset.dcPane !== tab);
+        });
+        if (tab === 'share') renderMyCardQr(readMyCardForm());
+        if (tab === 'lock') renderLockPreview();
+    }
+
+    async function openPublicCard(slug) {
+        document.body.classList.add('is-public-card');
+        [scanContent, contactsContent, networkContent, myCardContent].forEach((el) => el?.classList.add('hidden'));
+        publicCardContent?.classList.remove('hidden');
+        publicCardContent?.classList.add('fade-in');
+        chatWindow?.classList.add('hidden');
+
+        let card = null;
+        if (navigator.onLine) {
+            try {
+                const res = await fetch(`${API_URL}/profile/${encodeURIComponent(slug)}`);
+                if (res.ok) {
+                    const data = await res.json();
+                    card = data.profile;
+                }
+            } catch (err) {
+                /* fall back to local */
+            }
+        }
+        if (!card) {
+            const local = loadMyCard();
+            const localSlug = slugifyCard(local.slug || local.name || userId || TEMP_USER_ID);
+            if (localSlug === slug || slug === userId || slug === TEMP_USER_ID) card = local;
+        }
+        if (!card || !card.name) {
+            const sub = document.getElementById('publicCardSub');
+            if (sub) sub.textContent = 'This card is not available yet.';
+            return;
+        }
+        publicCardData = { ...card, slug };
+        fillDigitalCard(document.getElementById('publicCardPreview'), publicCardData);
+        renderMyCardQr(publicCardData, document.getElementById('publicCardQrCanvas'));
+        const sub = document.getElementById('publicCardSub');
+        if (sub) sub.textContent = [card.title, card.company].filter(Boolean).join(' · ') || 'Save this contact to your phone';
+    }
+
+    document.querySelectorAll('.dc-tab').forEach((btn) => {
+        btn.addEventListener('click', () => switchDcTab(btn.dataset.dcTab));
+    });
+
+    MY_CARD_FIELD_IDS.forEach((id) => {
+        document.getElementById(id)?.addEventListener('input', () => {
+            window.clearTimeout(myCardSyncTimer);
+            myCardSyncTimer = window.setTimeout(refreshMyCardPreview, 80);
+        });
+    });
+    document.getElementById('myCardAccent')?.addEventListener('input', refreshMyCardPreview);
+    document.querySelectorAll('input[name="myCardQrMode"]').forEach((input) => {
+        input.addEventListener('change', refreshMyCardPreview);
+    });
+    document.querySelectorAll('#myCardThemeRow [data-theme]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            const stored = { ...readMyCardForm(), theme: btn.dataset.theme };
+            saveMyCard(stored);
+            fillMyCardForm(stored);
+            refreshMyCardPreview();
+        });
+    });
+    document.querySelectorAll('#myCardLayoutRow [data-layout]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            const stored = { ...readMyCardForm(), layout: btn.dataset.layout };
+            saveMyCard(stored);
+            fillMyCardForm(stored);
+            refreshMyCardPreview();
+        });
+    });
+    document.querySelectorAll('#lockTemplateRow [data-lock-template]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            lockTemplate = btn.dataset.lockTemplate;
+            document.querySelectorAll('#lockTemplateRow [data-lock-template]').forEach((b) => {
+                b.classList.toggle('is-active', b === btn);
+            });
+            renderLockPreview();
+        });
+    });
+    document.getElementById('lockSizeSelect')?.addEventListener('change', renderLockPreview);
+
+    document.getElementById('myCardAvatarBtn')?.addEventListener('click', () => {
+        document.getElementById('myCardAvatar')?.click();
+    });
+    document.getElementById('myCardAvatar')?.addEventListener('change', async (e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        try {
+            const dataUrl = await compressAvatarFile(file);
+            const stored = { ...readMyCardForm(), avatar: dataUrl };
+            saveMyCard(stored);
+            fillMyCardForm(stored);
+            refreshMyCardPreview();
+        } catch (err) {
+            showToast('Could not use that photo', 'warning');
+        }
+    });
+    document.getElementById('myCardAvatarClear')?.addEventListener('click', () => {
+        const stored = { ...readMyCardForm(), avatar: '' };
+        saveMyCard(stored);
+        fillMyCardForm(stored);
+        refreshMyCardPreview();
+    });
+
+    myCardBtn?.addEventListener('click', () => switchToTab('mycard'));
+    document.getElementById('saveMyCardBtn')?.addEventListener('click', () => persistMyCard(readMyCardForm()));
+
+    document.getElementById('shareMyCardBtn')?.addEventListener('click', async () => {
+        const card = readMyCardForm();
+        if (!(await persistMyCard(card, { toast: false }))) return;
+        const url = myCardPublicUrl(card);
+        try {
+            if (navigator.share) {
+                await navigator.share({ title: card.name || 'My card', text: contactShareText(card), url });
+                showToast('Card shared', 'success');
+                return;
+            }
+        } catch (err) {
+            if (err && err.name === 'AbortError') return;
+        }
+        const result = await shareVCardContent(buildVCard({ ...card, profileUrl: url }), card, `${card.name}.vcf`);
+        if (result === 'fallback') showToast('Card copied and downloaded', 'success');
+        else if (result !== 'aborted') showToast('Card shared', 'success');
+    });
+
+    document.getElementById('copyMyCardUrlBtn')?.addEventListener('click', async () => {
+        try {
+            await copyTextToClipboard(myCardPublicUrl(readMyCardForm()));
+            showToast('Link copied', 'success');
+        } catch (err) {
+            showToast('Clipboard blocked — copy the URL under the QR', 'warning');
+        }
+    });
+
+    document.getElementById('downloadMyCardVcfBtn')?.addEventListener('click', async () => {
+        const card = readMyCardForm();
+        if (!card.name) {
+            showToast('Add your name before downloading', 'warning');
+            return;
+        }
+        await persistMyCard(card, { toast: false });
+        await downloadProfileVcf(card, card.slug);
+        showToast('vCard downloaded', 'success');
+    });
+
+    document.getElementById('downloadMyCardQrBtn')?.addEventListener('click', () => {
+        const canvas = document.getElementById('myCardQrCanvas');
+        if (!canvas) return;
+        const link = document.createElement('a');
+        link.download = 'folio-my-card-qr.png';
+        link.href = canvas.toDataURL('image/png');
+        link.click();
+    });
+
+    document.getElementById('downloadMyCardQrSvgBtn')?.addEventListener('click', () => {
+        if (typeof QRCode === 'undefined') return;
+        const card = readMyCardForm();
+        QRCode.toString(qrPayloadForCard(card), {
+            type: 'svg',
+            margin: 1,
+            color: { dark: '#1B2A4A', light: '#FFFFFF' },
+            width: 512,
+        }, (err, svg) => {
+            if (err) {
+                showToast('Could not export SVG', 'warning');
+                return;
+            }
+            downloadBlob(new Blob([svg], { type: 'image/svg+xml' }), 'folio-my-card-qr.svg');
+        });
+    });
+
+    document.getElementById('downloadLockBtn')?.addEventListener('click', downloadLockWallpaper);
+
+    document.getElementById('publicSaveVcfBtn')?.addEventListener('click', async () => {
+        if (!publicCardData) return;
+        await downloadProfileVcf(publicCardData, publicCardData.slug);
+        showToast('vCard downloaded', 'success');
+    });
+
+    // Register service worker + premium PWA experience (iOS + Android)
+    const installAppBtn = document.getElementById('installAppBtn');
+    const installSheet = document.getElementById('installSheet');
+    const connectivityBar = document.getElementById('connectivityBar');
+    const pwaUpdateBar = document.getElementById('pwaUpdateBar');
+    let deferredInstallPrompt = null;
+    let waitingWorker = null;
+
+    function isStandaloneDisplay() {
+        return window.matchMedia('(display-mode: standalone)').matches
+            || window.navigator.standalone === true
+            || document.referrer.includes('android-app://');
+    }
+
+    function isIosDevice() {
+        return /iphone|ipad|ipod/i.test(navigator.userAgent)
+            || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    }
+
+    function dismissBootSplash() {
+        const boot = document.getElementById('folioBoot');
+        if (!boot || boot.classList.contains('is-done')) return;
+        requestAnimationFrame(() => {
+            boot.classList.add('is-done');
+            setTimeout(() => boot.remove(), 500);
+        });
+    }
+
+    function showConnectivity(online) {
+        if (!connectivityBar) return;
+        if (online) {
+            connectivityBar.textContent = 'Back online';
+            connectivityBar.classList.remove('hidden', 'is-offline');
+            connectivityBar.classList.add('is-online');
+            setTimeout(() => connectivityBar.classList.add('hidden'), 2200);
+            document.body.classList.remove('is-offline');
+        } else {
+            connectivityBar.textContent = 'Offline — showing cached contacts when available';
+            connectivityBar.classList.remove('hidden', 'is-online');
+            connectivityBar.classList.add('is-offline');
+            document.body.classList.add('is-offline');
+        }
+    }
+
+    function openInstallSheet() {
+        if (!installSheet) return;
+        const androidBlock = document.getElementById('installAndroidBlock');
+        const iosBlock = document.getElementById('installIosBlock');
+        const desktopBlock = document.getElementById('installDesktopBlock');
+        androidBlock?.classList.add('hidden');
+        iosBlock?.classList.add('hidden');
+        desktopBlock?.classList.add('hidden');
+
+        if (isIosDevice() && !isStandaloneDisplay()) {
+            iosBlock?.classList.remove('hidden');
+        } else if (deferredInstallPrompt) {
+            androidBlock?.classList.remove('hidden');
+        } else {
+            desktopBlock?.classList.remove('hidden');
+        }
+        installSheet.classList.remove('hidden');
+        document.body.style.overflow = 'hidden';
+    }
+
+    function closeInstallSheet() {
+        installSheet?.classList.add('hidden');
+        document.body.style.overflow = '';
+    }
+
+    async function promptNativeInstall() {
+        if (!deferredInstallPrompt) {
+            openInstallSheet();
+            return;
+        }
+        deferredInstallPrompt.prompt();
+        const choice = await deferredInstallPrompt.userChoice;
+        deferredInstallPrompt = null;
+        installAppBtn?.classList.add('hidden');
+        closeInstallSheet();
+        if (choice.outcome === 'accepted') {
+            showToast('Folio installed', 'success');
+        }
+    }
+
+    if (isStandaloneDisplay()) {
+        document.body.classList.add('is-standalone');
+        installAppBtn?.classList.add('hidden');
+    } else {
+        // Show install affordance after a short delay (premium, not pushy)
+        setTimeout(() => {
+            if (isStandaloneDisplay()) return;
+            const dismissed = localStorage.getItem('folio_install_dismissed');
+            if (dismissed && Date.now() - Number(dismissed) < 7 * 86400000) return;
+            installAppBtn?.classList.remove('hidden');
+        }, 1800);
+    }
+
+    window.addEventListener('beforeinstallprompt', (e) => {
+        e.preventDefault();
+        deferredInstallPrompt = e;
+        if (!isStandaloneDisplay()) {
+            installAppBtn?.classList.remove('hidden');
+        }
+    });
+
+    window.addEventListener('appinstalled', () => {
+        deferredInstallPrompt = null;
+        installAppBtn?.classList.add('hidden');
+        closeInstallSheet();
+        localStorage.setItem('folio_install_dismissed', String(Date.now()));
+        showToast('Folio is on your home screen', 'success');
+    });
+
+    installAppBtn?.addEventListener('click', openInstallSheet);
+    document.getElementById('closeInstallSheet')?.addEventListener('click', () => {
+        localStorage.setItem('folio_install_dismissed', String(Date.now()));
+        closeInstallSheet();
+    });
+    installSheet?.addEventListener('click', (e) => {
+        if (e.target === installSheet) closeInstallSheet();
+    });
+    document.getElementById('confirmInstallBtn')?.addEventListener('click', promptNativeInstall);
+    document.getElementById('confirmInstallDesktopBtn')?.addEventListener('click', promptNativeInstall);
+
+    window.addEventListener('online', () => showConnectivity(true));
+    window.addEventListener('offline', () => showConnectivity(false));
+    if (!navigator.onLine) showConnectivity(false);
+
+    // Deep links from manifest shortcuts
+    try {
+        const params = new URLSearchParams(window.location.search);
+        const view = params.get('view');
+        const cardSlug = params.get('card');
+        if (cardSlug) {
+            setTimeout(() => openPublicCard(cardSlug), 50);
+        } else if (view === 'contacts' || view === 'scan' || view === 'network' || view === 'mycard') {
+            setTimeout(() => switchToTab(view), 50);
+        }
+    } catch (e) { /* ignore */ }
+
+    if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/sw.js?v=9').then((reg) => {
+            const showUpdate = (worker) => {
+                waitingWorker = worker;
+                pwaUpdateBar?.classList.remove('hidden');
+            };
+
+            if (reg.waiting) showUpdate(reg.waiting);
+
+            reg.addEventListener('updatefound', () => {
+                const worker = reg.installing;
+                if (!worker) return;
+                worker.addEventListener('statechange', () => {
+                    if (worker.state === 'installed' && navigator.serviceWorker.controller) {
+                        showUpdate(worker);
+                    }
+                });
+            });
+
+            // Periodic update check while app is open
+            setInterval(() => reg.update().catch(() => {}), 60 * 60 * 1000);
+        }).catch((err) => {
+            console.warn('Service worker registration failed:', err);
+        });
+
+        navigator.serviceWorker.addEventListener('controllerchange', () => {
+            // Reloaded after SKIP_WAITING
+        });
+
+        document.getElementById('pwaRefreshBtn')?.addEventListener('click', () => {
+            if (waitingWorker) {
+                waitingWorker.postMessage({ type: 'SKIP_WAITING' });
+            }
+            window.location.reload();
+        });
+    }
+
+    // Boot splash: hide once first paint + auth path ready
+    window.addEventListener('load', () => {
+        setTimeout(dismissBootSplash, 180);
+    });
+    setTimeout(dismissBootSplash, 2200);
 });

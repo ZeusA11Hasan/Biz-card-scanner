@@ -1,0 +1,10 @@
+[project]
+name = "folio"
+version = "1.0.0"
+description = "Folio business card scanner"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115.0",
+  "openai>=1.40.0",
+  "python-multipart>=0.0.9",
+]

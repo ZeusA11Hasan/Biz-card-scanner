@@ -244,6 +244,16 @@ $RECYCLE.BIN/
 # aws-sam
 .aws-sam
 
+# vercel
+.vercel
+public
+.npm-cache
+.tmp
+.xdg-data
+.xdg-config
+.vercel_python_packages/
+tmp/
+
 # folder for business card test
 /biz-cards-test/*
 

@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Demo cards</title>
+  <style>
+    html, body { margin: 0; background: #d8d2c6; }
+    .stage { min-height: 100vh; display: grid; place-items: center; padding: 40px; }
+    .card {
+      width: 840px;
+      height: 480px;
+      border-radius: 16px;
+      overflow: hidden;
+      box-sizing: border-box;
+      font-family: Georgia, "Times New Roman", serif;
+      position: relative;
+    }
+    .navy { background: #1B2A4A; color: #F4F0E8; }
+    .cream { background: #F4F0E8; color: #1B2A4A; border: 10px solid #1B2A4A; }
+    .copper { background: #2a241c; color: #F4F0E8; }
+    .paper { background: #faf7f1; color: #1B2A4A; border: 8px solid #C4A574; }
+    .pad { padding: 48px 56px; height: 100%; box-sizing: border-box; }
+    .kicker { font-family: system-ui, sans-serif; letter-spacing: 0.28em; font-size: 14px; text-transform: uppercase; opacity: 0.7; margin-bottom: 14px; }
+    h1 { font-size: 48px; margin: 0 0 6px; letter-spacing: -0.03em; }
+    .title { font-family: system-ui, sans-serif; font-size: 20px; margin: 0 0 20px; font-weight: 500; }
+    .company { font-size: 22px; margin: 0 0 28px; }
+    .meta { font-family: system-ui, sans-serif; font-size: 17px; line-height: 1.55; }
+    .bar { position: absolute; left: 0; top: 0; bottom: 0; width: 18px; background: #C4A574; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="stage">
+    <article class="card navy" id="card1">
+      <div class="bar"></div>
+      <div class="pad">
+        <div class="kicker">Northstar Health</div>
+        <h1>Maya Chen</h1>
+        <p class="title">Product Lead</p>
+        <p class="company">Northstar Health</p>
+        <div class="meta">
+          maya.chen@northstar.health<br>
+          +1 415 555 0142<br>
+          northstar.health<br>
+          San Francisco, CA
+        </div>
+      </div>
+    </article>
+    <article class="card cream hidden" id="card2">
+      <div class="pad">
+        <div class="kicker">Meridian Capital</div>
+        <h1>James Okonkwo</h1>
+        <p class="title">Partner</p>
+        <p class="company">Meridian Capital</p>
+        <div class="meta">
+          james@meridian.capital<br>
+          +44 20 7946 0991<br>
+          meridian.capital<br>
+          London, UK
+        </div>
+      </div>
+    </article>
+    <article class="card copper hidden" id="card3">
+      <div class="bar"></div>
+      <div class="pad">
+        <div class="kicker">Helix Robotics</div>
+        <h1>Priya Nair</h1>
+        <p class="title">Director of Sales</p>
+        <p class="company">Helix Robotics</p>
+        <div class="meta">
+          priya.nair@helixrobotics.com<br>
+          +65 6550 2218<br>
+          helixrobotics.com<br>
+          Singapore
+        </div>
+      </div>
+    </article>
+    <article class="card paper hidden" id="card4">
+      <div class="pad">
+        <div class="kicker">River & Stone Legal</div>
+        <h1>Elena Voss</h1>
+        <p class="title">Counsel</p>
+        <p class="company">River & Stone Legal</p>
+        <div class="meta">
+          elena.voss@riverstone.law<br>
+          +1 212 555 0198<br>
+          riverstone.law<br>
+          New York, NY
+        </div>
+      </div>
+    </article>
+  </div>
+  <script>
+    const id = new URLSearchParams(location.search).get('id') || 'card1';
+    document.querySelectorAll('.card').forEach((el) => {
+      el.classList.toggle('hidden', el.id !== id);
+    });
+  </script>
+</body>
+</html>

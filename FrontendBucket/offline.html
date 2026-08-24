@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#1B2A4A">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Offline · Folio</title>
+  <style>
+    :root { color-scheme: light; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100dvh;
+      display: grid;
+      place-items: center;
+      padding: 32px 24px;
+      font-family: "DM Sans", system-ui, sans-serif;
+      background: linear-gradient(180deg, #f3efe6 0%, #e8e1d4 100%);
+      color: #1b2a4a;
+      text-align: center;
+    }
+    .card {
+      width: min(100%, 360px);
+      background: #faf7f1;
+      border-radius: 22px;
+      padding: 28px 22px;
+      box-shadow: 0 14px 36px rgba(27, 42, 74, 0.08);
+    }
+    .mark {
+      width: 72px;
+      height: 72px;
+      margin: 0 auto 16px;
+      border-radius: 18px;
+      background: #f4f0e8;
+      border: 2px solid #1b2a4a;
+      display: grid;
+      place-items: center;
+      font-family: Georgia, serif;
+      font-size: 2rem;
+      font-weight: 700;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-family: Georgia, serif;
+      font-size: 1.75rem;
+      letter-spacing: -0.03em;
+    }
+    p {
+      margin: 0 0 20px;
+      color: #5c6578;
+      line-height: 1.45;
+    }
+    a {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 48px;
+      padding: 0 22px;
+      border-radius: 999px;
+      background: #1b2a4a;
+      color: #fff;
+      text-decoration: none;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="mark" aria-hidden="true">F</div>
+    <h1>You're offline</h1>
+    <p>Folio will keep your last contacts available. Reconnect to scan new cards.</p>
+    <a href="/">Back to Folio</a>
+  </div>
+</body>
+</html>
