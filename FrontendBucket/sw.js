@@ -1,5 +1,5 @@
 /* Folio PWA service worker — fast shell, offline fallback, cross-platform */
-const SW_VERSION = 'folio-pwa-v9';
+const SW_VERSION = 'folio-pwa-v10';
 const SHELL_CACHE = `${SW_VERSION}-shell`;
 const ASSET_CACHE = `${SW_VERSION}-assets`;
 const RUNTIME_CACHE = `${SW_VERSION}-runtime`;

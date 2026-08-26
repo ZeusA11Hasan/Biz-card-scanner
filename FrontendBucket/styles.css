@@ -420,7 +420,8 @@ body.camera-flashing .app-stage {
   opacity: 0;
   transition: opacity 0.35s ease;
   /* Never mirror: card text must stay readable for framing + OCR */
-  transform: none;
+  transform: none !important;
+  -webkit-transform: none !important;
   background: #0b1018;
 }
 
@@ -3085,7 +3086,8 @@ body.is-standalone #installAppBtn {
   }
 
   .camera-panel__video {
-    transform: none;
+    transform: none !important;
+    -webkit-transform: none !important;
     object-fit: cover;
   }
 

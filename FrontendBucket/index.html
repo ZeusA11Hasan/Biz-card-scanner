@@ -25,7 +25,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="dns-prefetch" href="https://d3js.org">
     <link rel="dns-prefetch" href="https://cdnjs.cloudflare.com">
-    <link rel="preload" href="/styles.css?v=10" as="style">
+    <link rel="preload" href="/styles.css?v=14" as="style">
     <link rel="preload" href="/android-chrome-192x192.png" as="image">
     <style>
       /* Critical boot splash — paints before CSS bundle */
@@ -66,8 +66,27 @@
       @media (prefers-reduced-motion: reduce) {
         #folioBoot .boot-mark { animation: none; }
       }
+      /* Card text must stay readable — never CSS-mirror the camera */
+      #cameraVideo.camera-panel__video,
+      .camera-panel__video {
+        transform: none !important;
+        -webkit-transform: none !important;
+      }
     </style>
-    <link href="styles.css?v=10" rel="stylesheet">
+    <script>
+      (function () {
+        if (!('serviceWorker' in navigator)) return;
+        navigator.serviceWorker.getRegistrations().then(function (regs) {
+          regs.forEach(function (reg) { reg.unregister(); });
+        });
+        if (window.caches && caches.keys) {
+          caches.keys().then(function (keys) {
+            keys.forEach(function (key) { caches.delete(key); });
+          });
+        }
+      })();
+    </script>
+    <link href="styles.css?v=14" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/amazon-cognito-identity-js@5.2.3/dist/amazon-cognito-identity.min.js"></script>
 </head>
@@ -919,6 +938,6 @@
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.js"></script>
-    <script src="script.js?v=12"></script>
+    <script src="script.js?v=14"></script>
 </body>
 </html>

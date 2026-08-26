@@ -1112,22 +1112,79 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    let ocrWorkerPromise = null;
+
+    function parseCardTextLocally(rawText) {
+        const text = (rawText || '').trim();
+        const data = {
+            name: '', company: '', department: '', title: '', email: '', phone: '',
+            address: '', website: '', industry: 'Other', notes: '', tags: [], followUpDate: ''
+        };
+        if (!text) {
+            data.notes = 'Could not read text automatically. Please edit this contact.';
+            return data;
+        }
+        const email = text.match(/[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}/i);
+        if (email) data.email = email[0];
+        const url = text.match(/https?:\/\/[^\s]+|www\.[^\s]+/i);
+        if (url) data.website = url[0].replace(/[.,;)]+$/, '');
+        const phone = text.match(/\+?\d[\d\s().\-]{7,}\d/);
+        if (phone) data.phone = phone[0].replace(/\s+/g, ' ').trim();
+        const skip = new Set([
+            data.email.toLowerCase(),
+            data.website.toLowerCase(),
+            data.phone,
+            data.phone.replace(/\s/g, ''),
+        ]);
+        const leftover = text.split(/\n/).map((line) => line.trim()).filter((line) => (
+            line && !skip.has(line.toLowerCase()) && !line.includes('@')
+        ));
+        if (leftover[0]) data.name = leftover[0].slice(0, 80);
+        if (leftover[1]) data.company = leftover[1].slice(0, 80);
+        if (leftover[2]) data.title = leftover[2].slice(0, 80);
+        return data;
+    }
+
+    function contactLooksEmpty(contact) {
+        if (!contact) return true;
+        return !['name', 'company', 'title', 'email', 'phone', 'website']
+            .some((key) => String(contact[key] || '').trim());
+    }
+
     async function ocrImageFile(source) {
-        if (typeof Tesseract === 'undefined' || !Tesseract.recognize) return '';
+        if (typeof Tesseract === 'undefined') return '';
         try {
+            if (Tesseract.createWorker) {
+                if (!ocrWorkerPromise) {
+                    ocrWorkerPromise = Tesseract.createWorker('eng');
+                }
+                const worker = await Promise.race([
+                    ocrWorkerPromise,
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('OCR worker timeout')), 35000)),
+                ]);
+                const result = await Promise.race([
+                    worker.recognize(source),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('OCR timeout')), 25000)),
+                ]);
+                return (result?.data?.text || '').trim();
+            }
+            if (!Tesseract.recognize) return '';
             const result = await Promise.race([
                 Tesseract.recognize(source, 'eng', { logger: () => {} }),
-                new Promise((resolve) => setTimeout(() => resolve(null), 8000)),
+                new Promise((resolve) => setTimeout(() => resolve(null), 25000)),
             ]);
-            if (!result) {
-                console.warn('Client OCR timed out; sending image without local text');
-                return '';
-            }
             return (result?.data?.text || '').trim();
         } catch (err) {
             console.warn('Client OCR failed:', err);
+            ocrWorkerPromise = null;
             return '';
         }
+    }
+
+    function rememberContacts(newContacts) {
+        if (!newContacts?.length) return;
+        contactsData = [...contactsData, ...newContacts];
+        return cacheContactsSnapshot(contactsData);
     }
 
     async function processBusinessCardFile(file) {
@@ -1135,47 +1192,58 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!file || !file.type.startsWith('image/')) {
             throw new Error('Invalid file type. Please upload an image.');
         }
-        if (file.size > 5 * 1024 * 1024) { // 5MB limit
-            throw new Error('File too large. Maximum size is 5MB.');
+        if (file.size > 12 * 1024 * 1024) {
+            throw new Error('File too large. Maximum size is 12MB.');
         }
 
         const imageDataUrl = await compressImageFile(file);
         const imageBase64 = imageDataUrl.split(',')[1];
-        // Live camera stills skip local OCR so capture cannot hang the UI;
-        // uploads still try a short Tesseract pass for better field extraction.
-        const fromCamera = /^folio-card-/i.test(file.name || '');
-        const rawText = fromCamera ? '' : await ocrImageFile(imageDataUrl);
+        if (processingStatus) processingStatus.textContent = 'Reading card text…';
+        const rawText = await ocrImageFile(imageDataUrl);
+        if (processingStatus) processingStatus.textContent = 'Saving contact…';
 
-        console.log('Sending API request for file');
-        const response = await fetch(`${API_URL}/scan`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                images: [imageBase64],
-                rawTexts: [rawText],
-                userId: userId
-            })
-        });
+        const localContact = {
+            ...parseCardTextLocally(rawText),
+            userId,
+            cardId: (crypto.randomUUID && crypto.randomUUID()) || `local-${Date.now()}`,
+            dateAdded: new Date().toISOString(),
+            originalImageUrl: imageDataUrl,
+        };
 
-        if (!response.ok) {
-            let detail = `${response.status} ${response.statusText}`;
-            try {
-                const errBody = await response.json();
-                if (errBody?.error) detail = errBody.error;
-            } catch (e) { /* ignore */ }
-            throw new Error(`Failed to process business card: ${detail}`);
+        try {
+            console.log('Sending API request for file');
+            const response = await fetch(`${API_URL}/scan`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    images: [imageBase64],
+                    rawTexts: [rawText],
+                    userId: userId
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`${response.status} ${response.statusText}`);
+            }
+
+            const result = await response.json();
+            console.log('API Response received:', result);
+            let newContacts = result?.contacts || [];
+            if ((!newContacts.length || contactLooksEmpty(newContacts[0])) && rawText) {
+                newContacts = newContacts.length
+                    ? [{ ...newContacts[0], ...Object.fromEntries(Object.entries(localContact).filter(([, value]) => value)) }]
+                    : [localContact];
+            }
+            if (!newContacts.length) newContacts = [localContact];
+            await rememberContacts(newContacts);
+            return { contacts: newContacts };
+        } catch (err) {
+            console.warn('Scan API failed, saving locally from OCR:', err);
+            await rememberContacts([localContact]);
+            return { contacts: [localContact] };
         }
-
-        const result = await response.json();
-        console.log('API Response received:', result);
-        const newContacts = result?.contacts || [];
-        if (newContacts.length) {
-            contactsData = [...contactsData, ...newContacts];
-            await cacheContactsSnapshot(contactsData);
-        }
-        return result;
     }
     
     // Function to show original image in a modal
@@ -3492,20 +3560,43 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function requestCameraStream() {
         const wide = isWideAppLayout();
-        const preferred = {
-            audio: false,
-            video: {
-                facingMode: { ideal: wide ? 'user' : 'environment' },
-                width: { ideal: wide ? 1280 : 1920 },
-                height: { ideal: wide ? 720 : 1080 },
-            },
-        };
+        if (!wide) {
+            try {
+                return await navigator.mediaDevices.getUserMedia({
+                    audio: false,
+                    video: {
+                        facingMode: { exact: 'environment' },
+                        width: { ideal: 1920 },
+                        height: { ideal: 1080 },
+                    },
+                });
+            } catch (err) {
+                console.warn('Rear camera unavailable, trying any back-facing device', err);
+            }
+            try {
+                return await navigator.mediaDevices.getUserMedia({
+                    audio: false,
+                    video: { facingMode: { ideal: 'environment' } },
+                });
+            } catch (err) {
+                console.warn('Ideal rear camera failed, trying any camera', err);
+            }
+        }
         try {
-            return await navigator.mediaDevices.getUserMedia(preferred);
+            return await navigator.mediaDevices.getUserMedia({
+                audio: false,
+                video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+            });
         } catch (err) {
             console.warn('Preferred camera failed, trying any video device', err);
             return navigator.mediaDevices.getUserMedia({ audio: false, video: true });
         }
+    }
+
+    function applyNaturalCameraPreview(video) {
+        if (!video) return;
+        video.style.setProperty('transform', 'none', 'important');
+        video.style.setProperty('-webkit-transform', 'none', 'important');
     }
 
     async function waitForCameraFrame(video, timeoutMs = 4000) {
@@ -3562,7 +3653,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 cameraVideo.setAttribute('playsinline', 'true');
                 cameraVideo.setAttribute('webkit-playsinline', 'true');
                 cameraVideo.muted = true;
-                cameraVideo.style.transform = 'none';
+                applyNaturalCameraPreview(cameraVideo);
                 cameraVideo.srcObject = cameraStream;
                 await waitForCameraFrame(cameraVideo);
                 await cameraVideo.play().catch((err) => {
@@ -4541,7 +4632,7 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (e) { /* ignore */ }
 
     if ('serviceWorker' in navigator) {
-        navigator.serviceWorker.register('/sw.js?v=9').then((reg) => {
+        navigator.serviceWorker.register('/sw.js?v=10').then((reg) => {
             const showUpdate = (worker) => {
                 waitingWorker = worker;
                 pwaUpdateBar?.classList.remove('hidden');
