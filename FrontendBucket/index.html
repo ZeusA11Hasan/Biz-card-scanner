@@ -25,7 +25,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="dns-prefetch" href="https://d3js.org">
     <link rel="dns-prefetch" href="https://cdnjs.cloudflare.com">
-    <link rel="preload" href="/styles.css?v=14" as="style">
+    <link rel="preload" href="/styles.css?v=15" as="style">
     <link rel="preload" href="/android-chrome-192x192.png" as="image">
     <style>
       /* Critical boot splash — paints before CSS bundle */
@@ -86,7 +86,7 @@
         }
       })();
     </script>
-    <link href="styles.css?v=14" rel="stylesheet">
+    <link href="styles.css?v=15" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/amazon-cognito-identity-js@5.2.3/dist/amazon-cognito-identity.min.js"></script>
 </head>
@@ -132,7 +132,7 @@
                     <div class="hero__copy">
                         <p class="hero-kicker">Business cards</p>
                         <h2 class="hero-title">Scan once.<br>Keep forever.</h2>
-                        <p class="hero-sub">Turn paper cards into a calm, searchable network — instantly.</p>
+                        <p class="hero-sub">Turn paper cards into a calm, searchable network. Capture both sides when numbers live on the back.</p>
                     </div>
                     <div class="hero__mascot" aria-hidden="true">
                         <span class="hero__mascot-glow"></span>
@@ -163,7 +163,7 @@
                         <span>Open webcam</span>
                     </button>
                     <button type="button" id="desktopUploadBtn" class="btn-secondary">Upload images</button>
-                    <p class="scan-desktop-hint">Or drag card photos onto the capture panel.</p>
+                    <p class="scan-desktop-hint">Or drag card photos onto the capture panel. Two photos can be saved as one card.</p>
                 </div>
                 </div>
 
@@ -226,7 +226,7 @@
                                 <img class="camera-panel__mascot-hidden" src="assets/mascot-idle.svg" alt="" id="scanMascot">
                             </div>
                             <p class="camera-panel__idle-title">Ready when you are</p>
-                            <p class="camera-panel__idle-sub" id="cameraIdleSub">Tap to open live camera · frame a card · capture</p>
+                            <p class="camera-panel__idle-sub" id="cameraIdleSub">Tap to open live camera · capture front · add the back if needed</p>
                         </div>
                     </div>
 
@@ -240,12 +240,21 @@
                         <div class="camera-panel__card-guide camera-panel__card-guide--live" aria-hidden="true">
                             <span class="camera-panel__scanline" aria-hidden="true"></span>
                         </div>
+                        <div class="camera-panel__side-chip" id="cameraSideChip">Front</div>
+                        <div class="camera-panel__flip-bar hidden" id="cameraFlipBar">
+                            <img id="cameraFlipThumb" alt="Front of card">
+                            <div class="camera-panel__flip-copy">
+                                <strong>Now capture the back</strong>
+                                <span>Flip the card, or skip if this side is enough.</span>
+                            </div>
+                            <button type="button" class="camera-panel__flip-skip" id="cameraSkipBackBtn">Skip</button>
+                        </div>
                         <img class="camera-panel__mascot camera-panel__mascot--live" src="assets/mascot-scanning.svg" alt="" id="scanMascotLive">
                         <div class="camera-panel__bar">
                             <button type="button" class="camera-panel__side-btn" id="cameraCloseBtn" aria-label="Close camera">
                                 <svg viewBox="0 0 24 24" fill="none"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
                             </button>
-                            <button type="button" class="camera-panel__shutter" id="cameraShutterBtn" aria-label="Capture card">
+                            <button type="button" class="camera-panel__shutter" id="cameraShutterBtn" aria-label="Capture front of card">
                                 <span class="camera-panel__shutter-ring"></span>
                             </button>
                             <button type="button" class="camera-panel__side-btn" id="cameraLibraryBtn" aria-label="Photo library">
@@ -259,6 +268,7 @@
 
                 <div class="scan-utils" id="dropZone">
                     <input type="file" id="fileUpload" accept="image/*" multiple class="hidden">
+                    <input type="file" id="fileUploadBack" accept="image/*" class="hidden">
                     <button id="resetBtn" class="btn-secondary hidden" type="button">Reset</button>
                     <div id="processingStatus"></div>
                     <div id="uploadProgress"></div>
@@ -716,6 +726,29 @@
             </div>
         </div>
 
+        <div id="cardSidesModal" class="modal-overlay hidden" role="dialog" aria-labelledby="cardSidesTitle">
+            <div class="modal-content sheet">
+                <div class="sheet-header">
+                    <h3 id="cardSidesTitle">Two-sided card?</h3>
+                    <button type="button" id="closeCardSidesModal" class="icon-btn icon-btn--ghost" aria-label="Close">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                        </svg>
+                    </button>
+                </div>
+                <div class="sheet-body">
+                    <p id="cardSidesMessage" class="hero-sub" style="margin:0 0 16px;">Some cards keep a phone or address on the back.</p>
+                    <button type="button" id="cardSidesPrimaryBtn" class="btn-luxury" style="width:100%;">
+                        <span class="btn-luxury__disc">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7.5A2.5 2.5 0 016.5 5h11A2.5 2.5 0 0120 7.5v9a2.5 2.5 0 01-2.5 2.5h-11A2.5 2.5 0 014 16.5v-9z"/></svg>
+                        </span>
+                        <span id="cardSidesPrimaryLabel">Add the other side</span>
+                    </button>
+                    <button type="button" id="cardSidesSecondaryBtn" class="btn-secondary" style="width:100%;margin-top:10px;">This side only</button>
+                </div>
+            </div>
+        </div>
+
         <!-- Edit Contact Modal -->
         <div id="editContactModal" class="modal-overlay hidden">
             <div class="modal-content sheet">
@@ -938,6 +971,6 @@
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.js"></script>
-    <script src="script.js?v=14"></script>
+    <script src="script.js?v=15"></script>
 </body>
 </html>

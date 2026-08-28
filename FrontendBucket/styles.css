@@ -733,8 +733,117 @@ body.camera-flashing .app-stage {
   transform: scale(0.94);
 }
 
-.camera-panel__shutter.is-pressing .camera-panel__shutter-ring {
-  background: #fff6d8;
+.camera-panel__side-chip {
+  position: absolute;
+  top: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 4;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(27, 42, 74, 0.72);
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
+.camera-panel__flip-bar {
+  position: absolute;
+  top: 52px;
+  left: 12px;
+  right: 12px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 16px;
+  background: rgba(18, 24, 38, 0.82);
+  color: #fff;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.camera-panel__flip-bar.hidden {
+  display: none;
+}
+
+.camera-panel__flip-bar:not(.hidden) ~ .camera-panel__mascot--live {
+  display: none;
+}
+
+.camera-panel__flip-bar img {
+  width: 44px;
+  height: 44px;
+  object-fit: cover;
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+
+.camera-panel__flip-copy {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.camera-panel__flip-copy strong {
+  font-size: 0.82rem;
+}
+
+.camera-panel__flip-copy span {
+  font-size: 0.72rem;
+  opacity: 0.8;
+}
+
+.camera-panel__flip-skip {
+  border: 0;
+  background: rgba(255,255,255,0.14);
+  color: #fff;
+  border-radius: 999px;
+  padding: 8px 12px;
+  font-size: 0.78rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.card-preview-tabs {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.card-preview-tab {
+  border: 0;
+  border-radius: 999px;
+  padding: 8px 16px;
+  background: rgba(255,255,255,0.16);
+  color: #fff;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.card-preview-tab.is-active {
+  background: #fff;
+  color: #1b2a4a;
+}
+
+.thumbnail-side-label {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(27, 42, 74, 0.8);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .scan-utils {

@@ -921,8 +921,9 @@ document.addEventListener('DOMContentLoaded', () => {
                                 ${contact.email ? `<span>${escapeHtml(contact.email)}</span>` : ''}
                                 ${contact.phone ? `<span>${escapeHtml(contact.phone)}</span>` : ''}
                             </div>
-                            ${(tags.length || followLabel) ? `
+                            ${(tags.length || followLabel || contact.sides > 1 || contact.originalBackImageUrl) ? `
                             <div class="contact-card__extras">
+                                ${(contact.sides > 1 || contact.originalBackImageUrl) ? `<span class="tag-chip">2 sides</span>` : ''}
                                 ${followLabel ? `<span class="due-badge due-badge--${followStatus || 'upcoming'}">${escapeHtml(followLabel)}</span>` : ''}
                                 ${tags.map((tag) => `<span class="tag-chip">${escapeHtml(tag)}</span>`).join('')}
                             </div>` : ''}
@@ -965,8 +966,8 @@ document.addEventListener('DOMContentLoaded', () => {
             img.addEventListener('click', () => {
                 const cardId = img.dataset.cardId;
                 const contact = contactsData.find(c => c.cardId === cardId);
-                if (contact && contact.originalImageUrl) {
-                    showOriginalImage(contact.originalImageUrl);
+                if (contact && (contact.originalImageUrl || contact.originalBackImageUrl)) {
+                    showOriginalImage(contact);
                 }
             });
         });
@@ -1040,6 +1041,7 @@ document.addEventListener('DOMContentLoaded', () => {
         thumbnailGallery.innerHTML = '';
         scanCompleteMessage.classList.add('hidden');
         setUploadShimmer(false);
+        pendingFrontUpload = null;
         const mascot = document.getElementById('scanMascot');
         const mascotLive = document.getElementById('scanMascotLive');
         if (mascot) mascot.src = 'assets/mascot-idle.svg';
@@ -1086,7 +1088,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Process Single Business Card File
-    async function compressImageFile(file, maxDim = 1400, quality = 0.72) {
+    async function compressImageFile(file, maxDim = 2000, quality = 0.85) {
         const dataUrl = await new Promise((resolve, reject) => {
             const reader = new FileReader();
             reader.onload = () => resolve(reader.result);
@@ -1124,20 +1126,36 @@ document.addEventListener('DOMContentLoaded', () => {
             data.notes = 'Could not read text automatically. Please edit this contact.';
             return data;
         }
-        const email = text.match(/[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}/i);
-        if (email) data.email = email[0];
-        const url = text.match(/https?:\/\/[^\s]+|www\.[^\s]+/i);
-        if (url) data.website = url[0].replace(/[.,;)]+$/, '');
-        const phone = text.match(/\+?\d[\d\s().\-]{7,}\d/);
-        if (phone) data.phone = phone[0].replace(/\s+/g, ' ').trim();
+        const emails = text.match(/[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}/gi) || [];
+        if (emails[0]) data.email = emails[0];
+        const urls = text.match(/https?:\/\/[^\s]+|www\.[^\s]+/gi) || [];
+        const website = urls.find((url) => !url.includes('@'));
+        if (website) data.website = website.replace(/[.,;)]+$/, '');
+        const phoneMatches = text.match(/(?:\+|00)?\d[\d \t().\-/]{6,}\d/g) || [];
+        const phones = [];
+        const seenDigits = new Set();
+        phoneMatches.forEach((match) => {
+            const cleaned = match.replace(/\s+/g, ' ').trim();
+            const digits = cleaned.replace(/\D/g, '');
+            if (digits.length < 8 || digits.length > 15 || seenDigits.has(digits)) return;
+            seenDigits.add(digits);
+            phones.push(cleaned);
+        });
+        if (phones.length) data.phone = phones.slice(0, 3).join(' / ');
         const skip = new Set([
             data.email.toLowerCase(),
             data.website.toLowerCase(),
-            data.phone,
-            data.phone.replace(/\s/g, ''),
+            'front',
+            'back',
+            ...phones.map((phone) => phone.toLowerCase()),
+            ...phones.map((phone) => phone.replace(/\s/g, '')),
         ]);
         const leftover = text.split(/\n/).map((line) => line.trim()).filter((line) => (
-            line && !skip.has(line.toLowerCase()) && !line.includes('@')
+            line
+            && !skip.has(line.toLowerCase())
+            && !line.includes('@')
+            && !/https?:\/\/|www\./i.test(line)
+            && (line.match(/[A-Za-z]/g) || []).length >= 2
         ));
         if (leftover[0]) data.name = leftover[0].slice(0, 80);
         if (leftover[1]) data.company = leftover[1].slice(0, 80);
@@ -1151,9 +1169,57 @@ document.addEventListener('DOMContentLoaded', () => {
             .some((key) => String(contact[key] || '').trim());
     }
 
+    function scoreOcrText(text) {
+        const value = (text || '').trim();
+        if (!value) return -1;
+        const emails = (value.match(/[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}/gi) || []).length;
+        const phones = (value.match(/(?:\+|00)?\d[\d \t().\-/]{6,}\d/g) || []).length;
+        const urls = (value.match(/https?:\/\/|www\./gi) || []).length;
+        const alnum = (value.match(/[A-Za-z0-9]/g) || []).length;
+        if (alnum < 6) return 0;
+        const words = value.split(/\s+/).filter(Boolean).length;
+        return emails * 10 + phones * 6 + urls * 4 + Math.min(words, 50) * 0.35;
+    }
+
+    async function prepareImageForOcr(dataUrl) {
+        return new Promise((resolve) => {
+            const img = new Image();
+            img.onload = () => {
+                let width = img.width;
+                let height = img.height;
+                const minSide = Math.min(width, height);
+                const scale = minSide < 1000 ? 1000 / minSide : (Math.max(width, height) > 2200 ? 2200 / Math.max(width, height) : 1);
+                width = Math.max(1, Math.round(width * scale));
+                height = Math.max(1, Math.round(height * scale));
+                const canvas = document.createElement('canvas');
+                canvas.width = width;
+                canvas.height = height;
+                const ctx = canvas.getContext('2d');
+                ctx.filter = 'grayscale(1) contrast(1.4) brightness(1.06)';
+                ctx.drawImage(img, 0, 0, width, height);
+                ctx.filter = 'none';
+                try {
+                    const imageData = ctx.getImageData(0, 0, width, height);
+                    const pixels = imageData.data;
+                    for (let i = 0; i < pixels.length; i += 4) {
+                        const v = pixels[i];
+                        const boosted = v < 118 ? Math.max(0, v - 24) : Math.min(255, v + 22);
+                        pixels[i] = pixels[i + 1] = pixels[i + 2] = boosted;
+                    }
+                    ctx.putImageData(imageData, 0, 0);
+                } catch (err) {
+                    console.warn('OCR preprocess fallback:', err);
+                }
+                resolve(canvas.toDataURL('image/jpeg', 0.92));
+            };
+            img.onerror = () => resolve(dataUrl);
+            img.src = dataUrl;
+        });
+    }
+
     async function ocrImageFile(source) {
         if (typeof Tesseract === 'undefined') return '';
-        try {
+        const recognizeOnce = async (psm) => {
             if (Tesseract.createWorker) {
                 if (!ocrWorkerPromise) {
                     ocrWorkerPromise = Tesseract.createWorker('eng');
@@ -1162,18 +1228,27 @@ document.addEventListener('DOMContentLoaded', () => {
                     ocrWorkerPromise,
                     new Promise((_, reject) => setTimeout(() => reject(new Error('OCR worker timeout')), 35000)),
                 ]);
+                if (worker.setParameters) {
+                    await worker.setParameters({ tessedit_pageseg_mode: String(psm) });
+                }
                 const result = await Promise.race([
                     worker.recognize(source),
-                    new Promise((_, reject) => setTimeout(() => reject(new Error('OCR timeout')), 25000)),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('OCR timeout')), 20000)),
                 ]);
                 return (result?.data?.text || '').trim();
             }
             if (!Tesseract.recognize) return '';
             const result = await Promise.race([
-                Tesseract.recognize(source, 'eng', { logger: () => {} }),
-                new Promise((resolve) => setTimeout(() => resolve(null), 25000)),
+                Tesseract.recognize(source, 'eng', { tessedit_pageseg_mode: String(psm), logger: () => {} }),
+                new Promise((resolve) => setTimeout(() => resolve(null), 20000)),
             ]);
             return (result?.data?.text || '').trim();
+        };
+        try {
+            const first = await recognizeOnce(6);
+            if (scoreOcrText(first) >= 8) return first;
+            const second = await recognizeOnce(4);
+            return scoreOcrText(second) > scoreOcrText(first) ? second : first;
         } catch (err) {
             console.warn('Client OCR failed:', err);
             ocrWorkerPromise = null;
@@ -1187,39 +1262,70 @@ document.addEventListener('DOMContentLoaded', () => {
         return cacheContactsSnapshot(contactsData);
     }
 
-    async function processBusinessCardFile(file) {
-        // Add file validation
-        if (!file || !file.type.startsWith('image/')) {
-            throw new Error('Invalid file type. Please upload an image.');
-        }
-        if (file.size > 12 * 1024 * 1024) {
-            throw new Error('File too large. Maximum size is 12MB.');
+    function mergeContactFields(base, extra) {
+        const merged = { ...(base || {}) };
+        Object.entries(extra || {}).forEach(([key, value]) => {
+            if (value === undefined || value === null || value === '') return;
+            if (!merged[key]) merged[key] = value;
+        });
+        return merged;
+    }
+
+    async function processBusinessCardSides(files) {
+        const sides = Array.from(files || []).filter(Boolean).slice(0, 2);
+        if (!sides.length) throw new Error('No card image provided');
+
+        const payloads = [];
+        for (let i = 0; i < sides.length; i += 1) {
+            const file = sides[i];
+            if (!file || !file.type.startsWith('image/')) {
+                throw new Error('Invalid file type. Please upload an image.');
+            }
+            if (file.size > 12 * 1024 * 1024) {
+                throw new Error('File too large. Maximum size is 12MB.');
+            }
+            const imageDataUrl = await compressImageFile(file);
+            const ocrSource = await prepareImageForOcr(imageDataUrl);
+            if (processingStatus) {
+                processingStatus.textContent = sides.length > 1
+                    ? `Reading ${i === 0 ? 'front' : 'back'} of card…`
+                    : 'Reading card text…';
+            }
+            const rawText = await ocrImageFile(ocrSource);
+            payloads.push({
+                imageDataUrl,
+                imageBase64: imageDataUrl.split(',')[1],
+                rawText,
+            });
         }
 
-        const imageDataUrl = await compressImageFile(file);
-        const imageBase64 = imageDataUrl.split(',')[1];
-        if (processingStatus) processingStatus.textContent = 'Reading card text…';
-        const rawText = await ocrImageFile(imageDataUrl);
+        const combinedText = payloads.map((payload, index) => {
+            const label = payloads.length > 1 ? (index === 0 ? 'FRONT' : 'BACK') : '';
+            return label ? `${label}\n${payload.rawText}` : payload.rawText;
+        }).join('\n\n');
+
         if (processingStatus) processingStatus.textContent = 'Saving contact…';
 
         const localContact = {
-            ...parseCardTextLocally(rawText),
+            ...parseCardTextLocally(combinedText),
             userId,
             cardId: (crypto.randomUUID && crypto.randomUUID()) || `local-${Date.now()}`,
             dateAdded: new Date().toISOString(),
-            originalImageUrl: imageDataUrl,
+            originalImageUrl: payloads[0].imageDataUrl,
+            originalBackImageUrl: payloads[1]?.imageDataUrl || '',
+            sides: payloads.length,
         };
 
         try {
-            console.log('Sending API request for file');
             const response = await fetch(`${API_URL}/scan`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
-                    images: [imageBase64],
-                    rawTexts: [rawText],
+                    images: payloads.map((payload) => payload.imageBase64),
+                    rawTexts: payloads.map((payload) => payload.rawText),
+                    twoSided: payloads.length > 1,
                     userId: userId
                 })
             });
@@ -1229,14 +1335,25 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             const result = await response.json();
-            console.log('API Response received:', result);
             let newContacts = result?.contacts || [];
-            if ((!newContacts.length || contactLooksEmpty(newContacts[0])) && rawText) {
-                newContacts = newContacts.length
-                    ? [{ ...newContacts[0], ...Object.fromEntries(Object.entries(localContact).filter(([, value]) => value)) }]
-                    : [localContact];
-            }
             if (!newContacts.length) newContacts = [localContact];
+            newContacts = newContacts.map((contact, index) => {
+                const fillFromLocal = contactLooksEmpty(contact)
+                    ? localContact
+                    : { ...localContact, notes: contact.notes || localContact.notes || '' };
+                const merged = contactLooksEmpty(contact)
+                    ? mergeContactFields(localContact, contact)
+                    : mergeContactFields(contact, fillFromLocal);
+                if (!contactLooksEmpty(contact)) merged.notes = contact.notes || '';
+                if (index === 0) {
+                    merged.originalImageUrl = localContact.originalImageUrl;
+                    if (localContact.originalBackImageUrl) {
+                        merged.originalBackImageUrl = localContact.originalBackImageUrl;
+                    }
+                    merged.sides = localContact.sides;
+                }
+                return merged;
+            });
             await rememberContacts(newContacts);
             return { contacts: newContacts };
         } catch (err) {
@@ -1245,42 +1362,69 @@ document.addEventListener('DOMContentLoaded', () => {
             return { contacts: [localContact] };
         }
     }
+
+    async function processBusinessCardFile(file) {
+        return processBusinessCardSides([file]);
+    }
     
     // Function to show original image in a modal
-    function showOriginalImage(originalImageDataUrl) {
-        // Create modal if it doesn't exist
+    function showOriginalImage(contactOrUrl) {
+        const contact = contactOrUrl && typeof contactOrUrl === 'object'
+            ? contactOrUrl
+            : { originalImageUrl: contactOrUrl };
+        const frontUrl = contact.originalImageUrl || '';
+        const backUrl = contact.originalBackImageUrl || '';
         let imageModal = document.getElementById('originalImageModal');
         if (!imageModal) {
             const modalHtml = `
                 <div id="originalImageModal" class="fixed inset-0 bg-black bg-opacity-75 hidden flex items-center justify-center z-50">
-                    <div class="relative max-w-4xl w-full mx-4">
-                        <button id="closeImageModal" class="absolute top-2 right-2 bg-white rounded-full p-1 shadow-lg">
+                    <div class="relative max-w-4xl w-full mx-4 card-preview-modal">
+                        <button id="closeImageModal" class="absolute top-2 right-2 bg-white rounded-full p-1 shadow-lg" type="button" aria-label="Close">
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
                             </svg>
                         </button>
+                        <div id="cardPreviewTabs" class="card-preview-tabs hidden">
+                            <button type="button" id="cardPreviewFrontBtn" class="card-preview-tab is-active">Front</button>
+                            <button type="button" id="cardPreviewBackBtn" class="card-preview-tab">Back</button>
+                        </div>
                         <img id="originalImage" src="" alt="Original business card" class="max-h-[90vh] max-w-full object-contain rounded shadow-lg">
                     </div>
                 </div>
             `;
             document.body.insertAdjacentHTML('beforeend', modalHtml);
             imageModal = document.getElementById('originalImageModal');
-            
-            // Add event listener to close button
             document.getElementById('closeImageModal').addEventListener('click', () => {
                 imageModal.classList.add('hidden');
             });
-            
-            // Close on click outside the image
             imageModal.addEventListener('click', (e) => {
                 if (e.target === imageModal) {
                     imageModal.classList.add('hidden');
                 }
             });
+            document.getElementById('cardPreviewFrontBtn').addEventListener('click', () => {
+                const img = document.getElementById('originalImage');
+                img.src = imageModal.dataset.frontUrl || img.src;
+                document.getElementById('cardPreviewFrontBtn').classList.add('is-active');
+                document.getElementById('cardPreviewBackBtn').classList.remove('is-active');
+            });
+            document.getElementById('cardPreviewBackBtn').addEventListener('click', () => {
+                const img = document.getElementById('originalImage');
+                img.src = imageModal.dataset.backUrl || img.src;
+                document.getElementById('cardPreviewBackBtn').classList.add('is-active');
+                document.getElementById('cardPreviewFrontBtn').classList.remove('is-active');
+            });
         }
-        
-        // Set image source and show modal
-        document.getElementById('originalImage').src = originalImageDataUrl;
+
+        imageModal.dataset.frontUrl = frontUrl;
+        imageModal.dataset.backUrl = backUrl;
+        const tabs = document.getElementById('cardPreviewTabs');
+        const frontBtn = document.getElementById('cardPreviewFrontBtn');
+        const backBtn = document.getElementById('cardPreviewBackBtn');
+        tabs.classList.toggle('hidden', !backUrl);
+        frontBtn.classList.add('is-active');
+        backBtn.classList.remove('is-active');
+        document.getElementById('originalImage').src = frontUrl || backUrl;
         imageModal.classList.remove('hidden');
     }
 
@@ -1340,6 +1484,13 @@ document.addEventListener('DOMContentLoaded', () => {
                             contact.originalImageUrl = contact.imageUrl;
                         } else {
                             contact.originalImageUrl = `${API_URL}/images/${contact.cardId}?userId=${encodeURIComponent(userId)}`;
+                        }
+                        if (contact.backImageUrl) {
+                            if (contact.backImageUrl.startsWith('data:') || contact.backImageUrl.startsWith('http')) {
+                                contact.originalBackImageUrl = contact.backImageUrl;
+                            } else {
+                                contact.originalBackImageUrl = `${API_URL}/images/${contact.cardId}?userId=${encodeURIComponent(userId)}&side=back`;
+                            }
                         }
                         
                         // Check if we already have a cached thumbnail in localStorage
@@ -3188,17 +3339,129 @@ document.addEventListener('DOMContentLoaded', () => {
     `;
     document.body.appendChild(uploadConfirmModal);
 
+    let pendingFrontUpload = null;
+
+    function askCardSidesChoice({ title, message, primary, secondary }) {
+        const modal = document.getElementById('cardSidesModal');
+        if (!modal) return Promise.resolve(false);
+        document.getElementById('cardSidesTitle').textContent = title;
+        document.getElementById('cardSidesMessage').textContent = message;
+        document.getElementById('cardSidesPrimaryLabel').textContent = primary;
+        document.getElementById('cardSidesSecondaryBtn').textContent = secondary;
+        modal.classList.remove('hidden');
+        document.body.style.overflow = 'hidden';
+        return new Promise((resolve) => {
+            const primaryBtn = document.getElementById('cardSidesPrimaryBtn');
+            const secondaryBtn = document.getElementById('cardSidesSecondaryBtn');
+            const closeBtn = document.getElementById('closeCardSidesModal');
+            const finish = (value) => {
+                modal.classList.add('hidden');
+                document.body.style.overflow = '';
+                primaryBtn.removeEventListener('click', onPrimary);
+                secondaryBtn.removeEventListener('click', onSecondary);
+                closeBtn.removeEventListener('click', onSecondary);
+                modal.removeEventListener('click', onBackdrop);
+                resolve(value);
+            };
+            const onPrimary = () => finish(true);
+            const onSecondary = () => finish(false);
+            const onBackdrop = (event) => {
+                if (event.target === modal) finish(false);
+            };
+            primaryBtn.addEventListener('click', onPrimary);
+            secondaryBtn.addEventListener('click', onSecondary);
+            closeBtn.addEventListener('click', onSecondary);
+            modal.addEventListener('click', onBackdrop);
+        });
+    }
+
+    async function ingestPairedSides(frontFile, backFile) {
+        const sides = [frontFile, backFile].filter(Boolean);
+        if (!sides.length) return;
+        if (processingStatus) processingStatus.textContent = sides.length > 1 ? 'Reading both sides…' : 'Reading card text…';
+        resetBtn.classList.remove('hidden');
+        uploadProgress.textContent = sides.length > 1 ? 'Saving front and back as one contact' : 'Saving contact';
+        thumbnailGallery.innerHTML = '';
+        setUploadShimmer(true);
+        sides.forEach((file, index) => {
+            createThumbnailElement(file, index, null, sides.length > 1 ? (index === 0 ? 'Front' : 'Back') : '');
+        });
+        try {
+            const result = await processBusinessCardSides(sides);
+            const ok = !!(result?.contacts?.length);
+            sides.forEach((_, index) => updateThumbnailStatus(index, ok));
+            if (ok) {
+                scanCompleteMessage.classList.remove('hidden');
+                scanCompleteMessage.classList.add('success-banner');
+                celebrateScanSuccess();
+                showToast(sides.length > 1 ? 'Saved both sides as one contact' : 'Card saved', 'success');
+                await loadContacts();
+                refreshAllVisualizations();
+            } else {
+                showToast('Could not save this card', 'error');
+            }
+        } catch (error) {
+            console.error('Error processing card sides:', error);
+            sides.forEach((_, index) => updateThumbnailStatus(index, false));
+            showToast(error.message || 'Failed to process this card', 'error');
+        } finally {
+            setUploadShimmer(false);
+            if (processingStatus) processingStatus.textContent = '';
+            if (fileUpload) fileUpload.value = '';
+            const backInput = document.getElementById('fileUploadBack');
+            if (backInput) backInput.value = '';
+        }
+    }
+
     // Shared ingest path for library uploads, drag-drop, and live camera captures
-    async function ingestImageFiles(fileList) {
+    async function ingestImageFiles(fileList, options = {}) {
         if (!await isAuthenticated()) {
             showToast('Please sign in to upload files', 'error');
             return;
         }
 
-        const files = fileList;
-        if (!files || files.length === 0) {
+        const files = Array.from(fileList || []).filter((file) => file && String(file.type || '').startsWith('image/'));
+        if (!files.length) {
             showToast('Please select at least one image file');
             return;
+        }
+
+        if (options.pairSides) {
+            await ingestPairedSides(files[0], files[1]);
+            return;
+        }
+
+        if (pendingFrontUpload && files.length === 1 && !options.skipPairPrompt) {
+            const front = pendingFrontUpload;
+            pendingFrontUpload = null;
+            await ingestPairedSides(front, files[0]);
+            return;
+        }
+
+        if (!options.skipPairPrompt && files.length === 1) {
+            const addBack = await askCardSidesChoice({
+                title: 'Add the other side?',
+                message: 'If a number, email, or address is on the back, add that photo too. We will save both sides as one contact.',
+                primary: 'Add the other side',
+                secondary: 'This side only',
+            });
+            if (addBack) {
+                pendingFrontUpload = files[0];
+                showToast('Choose the back of the card');
+                document.getElementById('fileUploadBack')?.click();
+                return;
+            }
+        } else if (!options.skipPairPrompt && files.length === 2) {
+            const pair = await askCardSidesChoice({
+                title: 'Same card?',
+                message: 'Save these as the front and back of one contact, or as two separate contacts.',
+                primary: 'Front and back of one card',
+                secondary: 'Two different cards',
+            });
+            if (pair) {
+                await ingestPairedSides(files[0], files[1]);
+                return;
+            }
         }
 
         // Maximum number of files allowed to upload at once
@@ -3366,9 +3629,20 @@ document.addEventListener('DOMContentLoaded', () => {
     fileUpload.addEventListener('change', async (event) => {
         await ingestImageFiles(event.target.files);
     });
+    document.getElementById('fileUploadBack')?.addEventListener('change', async (event) => {
+        const backFile = event.target.files?.[0];
+        if (!backFile) return;
+        if (pendingFrontUpload) {
+            const front = pendingFrontUpload;
+            pendingFrontUpload = null;
+            await ingestPairedSides(front, backFile);
+            return;
+        }
+        await ingestImageFiles([backFile]);
+    });
 
     // Helper function to create thumbnail elements
-    function createThumbnailElement(file, index, status) {
+    function createThumbnailElement(file, index, status, label = '') {
         const thumbnailContainer = document.createElement('div');
         thumbnailContainer.className = 'relative inline-block m-2';
         thumbnailContainer.id = `thumbnail-container-${index}`;
@@ -3408,6 +3682,12 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         
         thumbnailContainer.appendChild(thumbnail);
+        if (label) {
+            const sideLabel = document.createElement('span');
+            sideLabel.className = 'thumbnail-side-label';
+            sideLabel.textContent = label;
+            thumbnailContainer.appendChild(sideLabel);
+        }
         thumbnailContainer.appendChild(statusOverlay);
         thumbnailGallery.appendChild(thumbnailContainer);
 
@@ -3497,9 +3777,36 @@ document.addEventListener('DOMContentLoaded', () => {
     const cameraCloseBtn = document.getElementById('cameraCloseBtn');
     const cameraLibraryBtn = document.getElementById('cameraLibraryBtn');
     const scanMascotLive = document.getElementById('scanMascotLive');
+    const cameraFlipBar = document.getElementById('cameraFlipBar');
+    const cameraSkipBackBtn = document.getElementById('cameraSkipBackBtn');
     let cameraOpenBusy = false;
     let cameraStream = null;
     let cameraCapturing = false;
+    let pendingFrontFile = null;
+    let awaitingBackSide = false;
+
+    function setCameraSideChip(label) {
+        const chip = document.getElementById('cameraSideChip');
+        if (chip) chip.textContent = label;
+        cameraShutterBtn?.setAttribute('aria-label', `Capture ${String(label || 'card').toLowerCase()} of card`);
+    }
+
+    function hideFlipBar() {
+        cameraFlipBar?.classList.add('hidden');
+        const thumb = document.getElementById('cameraFlipThumb');
+        if (thumb?.src?.startsWith('blob:')) {
+            URL.revokeObjectURL(thumb.src);
+            thumb.removeAttribute('src');
+        }
+        setCameraSideChip('Front');
+    }
+
+    function showFlipBar(file) {
+        const thumb = document.getElementById('cameraFlipThumb');
+        if (thumb) thumb.src = URL.createObjectURL(file);
+        cameraFlipBar?.classList.remove('hidden');
+        setCameraSideChip('Back');
+    }
 
     function getCameraSourceEl(preferred) {
         if (preferred?.classList?.contains('camera-panel__shutter')) {
@@ -3555,7 +3862,19 @@ document.addEventListener('DOMContentLoaded', () => {
         if (cameraVideo) {
             cameraVideo.srcObject = null;
         }
+        hideFlipBar();
+        awaitingBackSide = false;
         setCameraLiveUi(false);
+    }
+
+    async function closeCameraAndMaybeSave() {
+        const pending = pendingFrontFile;
+        pendingFrontFile = null;
+        awaitingBackSide = false;
+        stopLiveCamera();
+        if (pending) {
+            await ingestImageFiles([pending], { skipPairPrompt: true });
+        }
     }
 
     async function requestCameraStream() {
@@ -3661,6 +3980,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 });
             }
             setCameraLiveUi(true);
+            setCameraSideChip('Front');
             cameraPanel?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         } catch (err) {
             console.warn('Live camera unavailable', err);
@@ -3717,9 +4037,21 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!blob) throw new Error('Capture failed');
 
             const file = new File([blob], `folio-card-${Date.now()}.jpg`, { type: 'image/jpeg' });
-            stopLiveCamera();
-            setMascotSrc('assets/mascot-scanning.svg');
-            await ingestImageFiles([file]);
+            if (awaitingBackSide && pendingFrontFile) {
+                const front = pendingFrontFile;
+                pendingFrontFile = null;
+                awaitingBackSide = false;
+                hideFlipBar();
+                stopLiveCamera();
+                setMascotSrc('assets/mascot-scanning.svg');
+                await ingestImageFiles([front, file], { pairSides: true });
+                return;
+            }
+
+            pendingFrontFile = file;
+            awaitingBackSide = true;
+            showFlipBar(file);
+            showToast('Front captured — flip the card for the back');
         } catch (err) {
             console.error(err);
             showToast('Could not capture photo', 'error');
@@ -3739,7 +4071,12 @@ document.addEventListener('DOMContentLoaded', () => {
     cameraCloseBtn?.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        stopLiveCamera();
+        closeCameraAndMaybeSave();
+    });
+    cameraSkipBackBtn?.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        closeCameraAndMaybeSave();
     });
     cameraLibraryBtn?.addEventListener('click', (e) => {
         e.preventDefault();
@@ -3760,8 +4097,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const sub = document.getElementById('cameraIdleSub');
         if (!sub) return;
         sub.textContent = isWideAppLayout()
-            ? 'Drop card photos here · or open webcam'
-            : 'Tap to open live camera · frame a card · capture';
+            ? 'Drop card photos here · or open webcam · add the back if needed'
+            : 'Tap to open live camera · capture front · add the back if needed';
     }
 
     updateScanIdleCopy();
@@ -3797,11 +4134,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 250);
     });
 
-    const stopCameraOnTabLeave = () => stopLiveCamera();
+    const stopCameraOnTabLeave = () => closeCameraAndMaybeSave();
     contactsTab?.addEventListener('click', stopCameraOnTabLeave);
     networkTab?.addEventListener('click', stopCameraOnTabLeave);
     document.getElementById('chatButton')?.addEventListener('click', stopCameraOnTabLeave);
-    window.addEventListener('pagehide', stopLiveCamera);
+    window.addEventListener('pagehide', () => {
+        closeCameraAndMaybeSave();
+    });
 
     if (cameraPanel && fileUpload) {
         ['dragenter', 'dragover'].forEach(evt => {

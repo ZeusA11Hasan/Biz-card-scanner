@@ -293,13 +293,53 @@ def lambda_handler(event, context):
             'headers': cors_headers
         }
 
+def persist_scanned_contact(image_bytes_list, raw_texts, user_id):
+    sides = [img for img in image_bytes_list if img]
+    if not sides:
+        raise KeyError("No images provided")
+    client_parts = []
+    for index, _image in enumerate(sides):
+        label = 'FRONT' if index == 0 else 'BACK'
+        text = raw_texts[index] if index < len(raw_texts) else ''
+        if len(sides) > 1:
+            client_parts.append(f'{label}\n{text}'.strip())
+        elif text:
+            client_parts.append(text)
+    client_text = '\n\n'.join(client_parts)
+
+    extra = sides[1:] if len(sides) > 1 else None
+    vision_data, raw_text = extract_card_text_sources(sides[0], client_text, extra)
+    if len(sides) > 1 and raw_text and 'FRONT' not in raw_text.upper():
+        raw_text = 'FRONT AND BACK OF THE SAME BUSINESS CARD:\n' + raw_text
+
+    parsed = parse_with_deepseek(raw_text)
+    card_data = merge_card_dicts(vision_data, parsed, parse_card_text_locally(raw_text))
+    if not card_data_filled(card_data) and not (raw_text or '').strip():
+        card_data['notes'] = 'Could not read text automatically. Please edit this contact.'
+
+    card_id = str(uuid.uuid4())
+    card_data['userId'] = user_id
+    card_data['cardId'] = card_id
+    card_data['dateAdded'] = datetime.now().isoformat()
+    card_data['sides'] = len(sides)
+    card_data['imageUrl'] = upload_image_to_s3(sides[0], card_id, user_id, 'front')
+    if len(sides) > 1:
+        card_data['backImageUrl'] = upload_image_to_s3(sides[1], card_id, user_id, 'back')
+    card_data.setdefault('notes', '')
+    card_data.setdefault('tags', [])
+    card_data.setdefault('followUpDate', '')
+    table.put_item(card_data)
+    return public_scan_card(card_data)
+
+
 def scan_business_card(event, context, cors_headers):
     try:
         body = json.loads(event['body'])
         user_id = body.get('userId', 'anonymous')
         images = body.get('images', [])
         raw_texts = body.get('rawTexts') or body.get('raw_texts') or []
-        
+        two_sided = bool(body.get('twoSided') or body.get('two_sided'))
+
         if not images:
             image_base64 = body.get('image')
             if not image_base64:
@@ -308,38 +348,17 @@ def scan_business_card(event, context, cors_headers):
         if not raw_texts and body.get('rawText'):
             raw_texts = [body.get('rawText')]
 
+        decoded = [decode_image_payload(image) for image in images]
+        if two_sided:
+            groups = [list(zip(decoded[:2], (raw_texts + ['', ''])[:2]))]
+        else:
+            groups = [[(image, raw_texts[index] if index < len(raw_texts) else '')] for index, image in enumerate(decoded)]
+
         results = []
-        for index, image_base64 in enumerate(images):
-            if ',' in image_base64 and str(image_base64).lstrip().startswith('data:'):
-                image_base64 = image_base64.split(',', 1)[1]
-            image_bytes = base64.b64decode(image_base64)
-            client_text = raw_texts[index] if index < len(raw_texts) else ''
-            raw_text = extract_card_text(image_bytes, client_text)
-            
-            # Parse with DeepSeek
-            card_data = parse_with_deepseek(raw_text)
-            
-            # Generate cardId and add metadata
-            card_id = str(uuid.uuid4())
-            card_data['userId'] = user_id
-            card_data['cardId'] = card_id
-            card_data['dateAdded'] = datetime.now().isoformat()
-            
-            # Upload the original image to S3
-            image_url = upload_image_to_s3(image_bytes, card_id, user_id)
-            
-            # Store the image URL in card data
-            card_data['imageUrl'] = image_url
-            card_data.setdefault('notes', '')
-            card_data.setdefault('tags', [])
-            card_data.setdefault('followUpDate', '')
-            
-            table.put_item(card_data)
-            public_card = dict(card_data)
-            # Don't send megabyte data-URL images back in the HTTP response
-            if str(public_card.get('imageUrl') or '').startswith('data:'):
-                public_card['imageUrl'] = ''
-            results.append(public_card)
+        for group in groups:
+            side_images = [item[0] for item in group]
+            side_texts = [item[1] for item in group]
+            results.append(persist_scanned_contact(side_images, side_texts, user_id))
 
         return {
             'statusCode': 200,
@@ -366,32 +385,197 @@ def extract_raw_text(textract_response):
     return '\n'.join(text_blocks)
 
 
-def extract_text_with_gemini(image_bytes):
+INDUSTRY_OPTIONS = (
+    'Technology, Healthcare, Finance, Manufacturing, Retail, Education, '
+    'Government, Non-Profit, Media, Transportation, Energy, Agriculture, '
+    'Construction, Hospitality, Legal, Consulting, Real Estate, Telecommunications, Other'
+)
+EMAIL_RE = re.compile(r'[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}', re.I)
+URL_RE = re.compile(r'(https?://[^\s]+|www\.[^\s]+)', re.I)
+PHONE_RE = re.compile(r'(?:\+|00)?\d[\d \t().\-/]{6,}\d')
+CARD_FIELD_KEYS = (
+    'name', 'company', 'department', 'title', 'email', 'phone', 'address', 'website', 'industry'
+)
+
+
+def decode_image_payload(image_base64):
+    if not image_base64:
+        return b''
+    raw = str(image_base64)
+    if ',' in raw and raw.lstrip().startswith('data:'):
+        raw = raw.split(',', 1)[1]
+    return base64.b64decode(raw)
+
+
+def strip_json_fence(text):
+    cleaned = (text or '').strip()
+    cleaned = re.sub(r'^```(?:json)?\s*', '', cleaned, flags=re.I)
+    cleaned = re.sub(r'\s*```$', '', cleaned)
+    match = re.search(r'\{[\s\S]*\}', cleaned)
+    return match.group(0) if match else cleaned
+
+
+def ocr_quality_score(text):
+    value = (text or '').strip()
+    if not value:
+        return -1
+    emails = len(EMAIL_RE.findall(value))
+    phones = len(PHONE_RE.findall(value))
+    urls = len(URL_RE.findall(value))
+    alnum = sum(ch.isalnum() for ch in value)
+    if alnum < 6:
+        return 0
+    words = [w for w in re.split(r'\s+', value) if w]
+    garbage = 1 - (alnum / max(len(value), 1))
+    return emails * 10 + phones * 6 + urls * 4 + min(len(words), 50) * 0.35 - garbage * 12
+
+
+def card_data_filled(data):
+    if not data:
+        return False
+    return any(str(data.get(key) or '').strip() for key in ('name', 'company', 'title', 'email', 'phone', 'website'))
+
+
+def merge_ocr_texts(*texts):
+    seen = set()
+    lines = []
+    for text in texts:
+        for line in (text or '').splitlines():
+            normalized = re.sub(r'\s+', ' ', line).strip()
+            key = normalized.lower()
+            if not normalized or key in seen:
+                continue
+            seen.add(key)
+            lines.append(normalized)
+    return '\n'.join(lines)
+
+
+def merge_card_dicts(*sources):
+    merged = empty_card_data()
+    for source in sources:
+        if not source:
+            continue
+        for key in CARD_FIELD_KEYS:
+            current = merged.get(key)
+            incoming = source.get(key)
+            if key == 'industry':
+                if incoming and incoming != 'Other' and (not current or current == 'Other'):
+                    merged[key] = incoming
+                continue
+            if (not current) and incoming not in (None, '', []):
+                merged[key] = incoming
+            elif key == 'phone' and incoming and current and str(incoming) not in str(current):
+                left_digits = re.sub(r'\D', '', str(current))
+                right_digits = re.sub(r'\D', '', str(incoming))
+                if right_digits and right_digits not in left_digits:
+                    merged[key] = f'{current} / {incoming}'
+    return merged
+
+
+def public_scan_card(card_data):
+    public_card = dict(card_data)
+    for key in ('imageUrl', 'backImageUrl'):
+        if str(public_card.get(key) or '').startswith('data:'):
+            public_card[key] = ''
+    return public_card
+
+
+def extract_text_with_textract(image_bytes):
+    if not textract or not image_bytes:
+        return ''
+    try:
+        response = textract.detect_document_text(Document={'Bytes': image_bytes})
+        return extract_raw_text(response)
+    except Exception as err:
+        logger.warning('Textract OCR failed: %s', err)
+        return ''
+
+
+def gemini_generate(parts, models=None):
     api_key = os.environ.get('GEMINI_API_KEY')
     if not api_key:
         return ''
-    model = os.environ.get('GEMINI_MODEL', 'gemini-2.0-flash')
-    payload = json.dumps({
-        'contents': [{
-            'parts': [
-                {'text': 'Extract all visible text from this business card. Return plain text only.'},
-                {'inline_data': {'mime_type': 'image/jpeg', 'data': base64.b64encode(image_bytes).decode('utf-8')}},
-            ]
-        }]
-    }).encode('utf-8')
-    url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}'
-    req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+    preferred = os.environ.get('GEMINI_MODEL') or 'gemini-2.0-flash'
+    candidates = models or [preferred, 'gemini-2.5-flash', 'gemini-2.0-flash-lite']
+    seen = []
+    for model in candidates:
+        if not model or model in seen:
+            continue
+        seen.append(model)
+        payload = json.dumps({'contents': [{'parts': parts}]}).encode('utf-8')
+        url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}'
+        req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+        try:
+            with urllib.request.urlopen(req, timeout=50) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+            text_parts = data.get('candidates', [{}])[0].get('content', {}).get('parts', [])
+            return '\n'.join(part.get('text', '') for part in text_parts).strip()
+        except urllib.error.HTTPError as err:
+            logger.warning('Gemini %s failed: %s', model, err.read().decode('utf-8', errors='ignore'))
+        except Exception as err:
+            logger.warning('Gemini %s failed: %s', model, err)
+    return ''
+
+
+def gemini_image_parts(image_bytes_list):
+    parts = []
+    for image_bytes in image_bytes_list or []:
+        if not image_bytes:
+            continue
+        parts.append({
+            'inline_data': {
+                'mime_type': 'image/jpeg',
+                'data': base64.b64encode(image_bytes).decode('utf-8'),
+            }
+        })
+    return parts
+
+
+def extract_card_with_gemini(image_bytes_list):
+    images = [img for img in (image_bytes_list or []) if img]
+    if not images:
+        return {}, ''
+    sides_note = (
+        'These photos are the FRONT then BACK of the same business card. Read both sides.'
+        if len(images) > 1 else
+        'Read every visible character on this business card.'
+    )
+    prompt = (
+        f'{sides_note} Extract contact details even if they are small, rotated, on a dark background, '
+        'or split across sides. Return JSON only with keys: '
+        'name, company, department, title, email, phone, address, website, industry, rawText. '
+        'phone may include multiple numbers separated by " / ". '
+        f'industry must be one of: {INDUSTRY_OPTIONS}. '
+        'rawText must contain all readable text, with FRONT/BACK labels when both sides are present. '
+        'Leave unknown keys empty. Do not invent details.'
+    )
+    text = gemini_generate([{'text': prompt}, *gemini_image_parts(images)])
+    parsed = {}
+    raw_text = text
     try:
-        with urllib.request.urlopen(req, timeout=45) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
-        parts = data.get('candidates', [{}])[0].get('content', {}).get('parts', [])
-        return '\n'.join(part.get('text', '') for part in parts).strip()
-    except urllib.error.HTTPError as err:
-        logger.warning('Gemini OCR failed: %s', err.read().decode('utf-8', errors='ignore'))
-        return ''
-    except Exception as err:
-        logger.warning('Gemini OCR failed: %s', err)
-        return ''
+        payload = json.loads(strip_json_fence(text))
+        if isinstance(payload, dict):
+            parsed = {key: payload.get(key, '') for key in CARD_FIELD_KEYS}
+            raw_text = payload.get('rawText') or text
+    except Exception:
+        parsed = {}
+    return parsed, (raw_text or '').strip()
+
+
+def extract_text_with_gemini(image_bytes):
+    _parsed, text = extract_card_with_gemini([image_bytes] if image_bytes else [])
+    return text
+
+
+def extract_card_text_sources(image_bytes, client_text='', extra_images=None):
+    images = [image_bytes, *(extra_images or [])]
+    vision_data, gemini_text = extract_card_with_gemini(images)
+    textract_texts = [extract_text_with_textract(image) for image in images if image]
+    merged = merge_ocr_texts(gemini_text, *textract_texts, client_text)
+    if ocr_quality_score(merged) < 0:
+        logger.warning('No server OCR available; continuing with client text only')
+        return vision_data, (client_text or '').strip()
+    return vision_data, merged
 
 
 def empty_card_data():
@@ -419,61 +603,82 @@ def parse_card_text_locally(raw_text):
         data['notes'] = 'Could not read text automatically. Please edit this contact.'
         return data
 
-    email_match = re.search(r'[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}', text, re.I)
-    if email_match:
-        data['email'] = email_match.group(0)
+    emails = EMAIL_RE.findall(text)
+    if emails:
+        data['email'] = emails[0]
 
-    url_match = re.search(r'(https?://[^\s]+|www\.[^\s]+)', text, re.I)
-    if url_match:
-        data['website'] = url_match.group(0).rstrip('.,;)')
+    for match in URL_RE.findall(text):
+        candidate = match.rstrip('.,;)')
+        if '@' in candidate:
+            continue
+        data['website'] = candidate
+        break
 
-    phone_match = re.search(r'(\+?\d[\d\s().\-]{7,}\d)', text)
-    if phone_match:
-        data['phone'] = re.sub(r'\s+', ' ', phone_match.group(0)).strip()
+    phones = []
+    seen_digits = set()
+    for match in PHONE_RE.findall(text):
+        cleaned = re.sub(r'\s+', ' ', match).strip(' .-')
+        digits = re.sub(r'\D', '', cleaned)
+        if len(digits) < 8 or len(digits) > 15 or digits in seen_digits:
+            continue
+        seen_digits.add(digits)
+        phones.append(cleaned)
+    if phones:
+        data['phone'] = ' / '.join(phones[:3])
 
     skip = {
         data['email'].lower(),
         data['website'].lower(),
-        data['phone'],
-        data['phone'].replace(' ', ''),
+        *(phone.lower() for phone in phones),
+        *(re.sub(r'\s+', '', phone) for phone in phones),
+        'front', 'back',
     }
-    leftover = [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip() and line.strip().lower() not in skip and '@' not in line
-    ]
+    leftover = []
+    for line in text.splitlines():
+        stripped = re.sub(r'\s+', ' ', line).strip(' -:|')
+        if not stripped or stripped.lower() in skip or '@' in stripped:
+            continue
+        if URL_RE.search(stripped) or PHONE_RE.search(stripped):
+            continue
+        letters = sum(ch.isalpha() for ch in stripped)
+        if letters < 2:
+            continue
+        leftover.append(stripped[:80])
+
+    company_hint = re.compile(r'\b(inc|ltd|llc|pvt|gmbh|corp|co|company|group|studio|labs?|technologies|solutions)\b', re.I)
     if leftover:
-        data['name'] = leftover[0][:80]
-        if len(leftover) > 1:
+        company_line = next((line for line in leftover if company_hint.search(line)), '')
+        name_line = leftover[0]
+        if company_line and name_line == company_line and len(leftover) > 1:
+            name_line = leftover[1]
+        data['name'] = name_line[:80]
+        if company_line:
+            data['company'] = company_line[:80]
+        elif len(leftover) > 1:
             data['company'] = leftover[1][:80]
-        if len(leftover) > 2:
-            data['title'] = leftover[2][:80]
+        title_line = next((line for line in leftover if line not in (data['name'], data['company'])), '')
+        if title_line:
+            data['title'] = title_line[:80]
+        address_hint = re.compile(r'\b(rd|road|st|street|ave|avenue|lane|blvd|po box|city|floor)\b', re.I)
+        address_line = next((line for line in leftover if address_hint.search(line) or re.search(r'\d{1,5}\s+[A-Za-z]', line)), '')
+        if address_line and address_line not in (data['name'], data['company'], data['title']):
+            data['address'] = address_line[:160]
     return data
 
 
-def extract_card_text(image_bytes, client_text=''):
-    text = (client_text or '').strip()
-    if text:
-        return text
-    gemini_text = extract_text_with_gemini(image_bytes)
-    if gemini_text:
-        return gemini_text
-    if textract:
-        textract_response = textract.detect_document_text(Document={'Bytes': image_bytes})
-        return extract_raw_text(textract_response)
-    logger.warning('No server OCR available; continuing with client text only')
-    return ''
+def extract_card_text(image_bytes, client_text='', extra_images=None):
+    vision_data, merged = extract_card_text_sources(image_bytes, client_text, extra_images)
+    return merged or (client_text or '').strip()
 
 def parse_with_deepseek(raw_text):
     prompt = (
-        "Extract the following information from the provided business card text: "
-        "name, company, department, title, email, phone, address, website. "
+        "Extract the following information from the provided business card text. "
+        "The text may include FRONT and BACK sides of the same card — merge both sides into one contact. "
+        "Fields: name, company, department, title, email, phone, address, website. "
+        "Put every phone/mobile/fax/WhatsApp number into phone, separated by ' / '. "
         "Additionally, categorize the company's industry from the following list: "
-        "Technology, Healthcare, Finance, Manufacturing, Retail, Education, "
-        "Government, Non-Profit, Media, Transportation, Energy, Agriculture, "
-        "Construction, Hospitality, Legal, Consulting, Real Estate, Telecommunications, "
-        "Other. Return the data as a JSON object with these exact keys, including 'industry' "
-        "as the last key. Leave keys empty if not found. "
+        f"{INDUSTRY_OPTIONS}. Return the data as a JSON object with these exact keys, including 'industry' "
+        "as the last key. Leave keys empty if not found. Never invent missing values. "
         "Extract only the core company name (e.g., 'AWS' from 'AWS Commercial Sales'). "
         "For industry categorization, consider both the company name and title. "
         "Do not include any additional text outside the JSON object."
@@ -492,7 +697,7 @@ def parse_with_deepseek(raw_text):
             stream=False
         )
         card_data_str = completion.choices[0].message.content
-        cleaned_card_data_str = card_data_str.replace('```json', '').replace('```', '').strip()
+        cleaned_card_data_str = strip_json_fence(card_data_str)
         try:
             card_data = json.loads(cleaned_card_data_str)
             return card_data
@@ -704,9 +909,13 @@ def update_contact(event, cors_headers):
             'followUpDate': body.get('followUpDate', existing_contact.get('followUpDate', ''))
         }
         
-        # Preserve imageUrl if it exists in the original contact
+        # Preserve image URLs if they exist in the original contact
         if 'imageUrl' in existing_contact:
             updated_contact['imageUrl'] = existing_contact['imageUrl']
+        if 'backImageUrl' in existing_contact:
+            updated_contact['backImageUrl'] = existing_contact['backImageUrl']
+        if 'sides' in existing_contact:
+            updated_contact['sides'] = existing_contact['sides']
             
         # Also preserve any other fields that might exist in the original contact
         for key, value in existing_contact.items():
@@ -738,21 +947,23 @@ def update_contact(event, cors_headers):
 def delete_stored_image(user_id, card_id):
     if not (s3_client and BACKEND_BUCKET_NAME):
         return
-    try:
-        image_key = f"{user_id}/cards/{card_id}.jpg"
-        s3_client.delete_object(Bucket=BACKEND_BUCKET_NAME, Key=image_key)
-        logger.info(f"Deleted image from S3: {image_key}")
-    except Exception as e:
-        logger.warning(f"Error deleting image from S3: {str(e)}")
+    for suffix in ('', '-back'):
+        try:
+            image_key = f"{user_id}/cards/{card_id}{suffix}.jpg"
+            s3_client.delete_object(Bucket=BACKEND_BUCKET_NAME, Key=image_key)
+            logger.info(f"Deleted image from S3: {image_key}")
+        except Exception as e:
+            logger.warning(f"Error deleting image from S3: {str(e)}")
 
 
-def upload_image_to_s3(image_bytes, card_id, user_id):
+def upload_image_to_s3(image_bytes, card_id, user_id, side='front'):
     """Upload the original image to S3, or keep a data URL on Vercel."""
     if not (s3_client and BACKEND_BUCKET_NAME):
         encoded = base64.b64encode(image_bytes).decode('utf-8')
         return f'data:image/jpeg;base64,{encoded}'
 
-    key = f"{user_id}/cards/{card_id}.jpg"
+    suffix = '-back' if side == 'back' else ''
+    key = f"{user_id}/cards/{card_id}{suffix}.jpg"
     try:
         s3_client.put_object(
             Bucket=BACKEND_BUCKET_NAME,
@@ -777,7 +988,10 @@ def get_image(event, cors_headers):
             raise KeyError("cardId is required")
 
         contact = table.get_item(user_id, card_id) or {}
-        image_url = contact.get('imageUrl') or ''
+        params = event.get('queryStringParameters') or {}
+        side = (params.get('side') or 'front').lower()
+        image_url = contact.get('backImageUrl') if side == 'back' else contact.get('imageUrl')
+        image_url = image_url or ''
         if image_url.startswith('data:'):
             header, encoded = image_url.split(',', 1)
             mime = 'image/jpeg'
@@ -802,7 +1016,7 @@ def get_image(event, cors_headers):
                 'headers': cors_headers
             }
 
-        key = f"{user_id}/cards/{card_id}.jpg"
+        key = f"{user_id}/cards/{card_id}-back.jpg" if side == 'back' else f"{user_id}/cards/{card_id}.jpg"
         url = s3_client.generate_presigned_url(
             'get_object',
             Params={
