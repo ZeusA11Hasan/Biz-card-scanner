@@ -6,6 +6,7 @@ import base64
 import logging
 import urllib.error
 import urllib.request
+from pathlib import Path
 from openai import OpenAI
 from datetime import datetime, timezone
 
@@ -14,11 +15,45 @@ try:
 except ImportError:
     boto3 = None
 
-from store import JsonTable
+from auth import auth_enabled, handle_auth, identity_from_event, google_client_id
+from store import get_store, storage_kind
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
+
+
+def load_local_env():
+    root = Path(__file__).resolve().parent.parent
+    for name in ('.env', '.env.local'):
+        env_path = root / name
+        if not env_path.is_file():
+            continue
+        try:
+            for raw in env_path.read_text(encoding='utf-8').splitlines():
+                line = raw.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                key, value = line.split('=', 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if not key or not value:
+                    continue
+                os.environ.setdefault(key, value)
+                os.environ.setdefault(key.upper(), value)
+        except Exception as err:
+            logger.warning('Could not load %s: %s', name, err)
+
+
+def env_any(*names):
+    for name in names:
+        value = (os.environ.get(name) or '').strip()
+        if value and value != 'missing':
+            return value
+    return ''
+
+
+load_local_env()
 
 DYNAMODB_TABLE_NAME = os.environ.get('DYNAMODB_TABLE_NAME')
 BACKEND_BUCKET_NAME = os.environ.get('BACKEND_BUCKET_NAME')
@@ -31,9 +66,23 @@ client = OpenAI(
     base_url=os.environ.get('DEEPSEEK_BASE_URL', 'https://api.deepseek.com'),
 )
 
+openrouter_client = None
+if env_any('OPENROUTER_API_KEY', 'openrouter_api_key'):
+    openrouter_client = OpenAI(
+        api_key=env_any('OPENROUTER_API_KEY', 'openrouter_api_key'),
+        base_url=os.environ.get('OPENROUTER_BASE_URL', 'https://openrouter.ai/api/v1'),
+        default_headers={
+            'HTTP-Referer': os.environ.get(
+                'OPENROUTER_SITE_URL',
+                'https://folio-althafhasan03-2812s-projects.vercel.app',
+            ),
+            'X-Title': 'Folio',
+        },
+    )
+
 textract = None
 s3_client = None
-table = JsonTable()
+table = get_store()
 
 if USE_AWS:
     dynamodb = boto3.resource('dynamodb', region_name=REGION)
@@ -241,11 +290,13 @@ def lambda_handler(event, context):
     # Base CORS headers
     cors_headers = {
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
         'Access-Control-Allow-Methods': 'POST, GET, PUT, DELETE, OPTIONS',
         'Content-Type': 'application/json'
     }
 
+    if path.startswith('/auth/'):
+        return handle_auth(event, path, http_method, cors_headers)
     if path == '/scan' and http_method == 'POST':
         return scan_business_card(event, context, cors_headers)
     elif path == '/network' and http_method == 'GET':
@@ -277,7 +328,16 @@ def lambda_handler(event, context):
     elif path in ('/health', '/api/health') and http_method == 'GET':
         return {
             'statusCode': 200,
-            'body': json.dumps({'ok': True, 'service': 'folio'}),
+            'body': json.dumps({
+                'ok': True,
+                'service': 'folio',
+                'vision': bool(env_any('OPENROUTER_API_KEY', 'openrouter_api_key', 'GEMINI_API_KEY')),
+                'parser': bool(env_any('OPENROUTER_API_KEY', 'openrouter_api_key', 'DEEPSEEK_API_KEY')),
+                'db': storage_kind(),
+                'images': 'postgres' if storage_kind() == 'postgres' else ('s3' if (s3_client and BACKEND_BUCKET_NAME) else 'store'),
+                'auth': auth_enabled(),
+                'google': bool(google_client_id()),
+            }),
             'headers': cors_headers
         }
     elif http_method == 'OPTIONS':
@@ -292,6 +352,17 @@ def lambda_handler(event, context):
             'body': json.dumps({'error': 'Not Found'}),
             'headers': cors_headers
         }
+
+def require_user(event, cors_headers, body=None, params=None):
+    user_id, err = identity_from_event(event, body=body, params=params)
+    if err:
+        return None, {
+            'statusCode': 401,
+            'body': json.dumps({'error': err}),
+            'headers': cors_headers,
+        }
+    return user_id, None
+
 
 def persist_scanned_contact(image_bytes_list, raw_texts, user_id):
     sides = [img for img in image_bytes_list if img]
@@ -335,7 +406,9 @@ def persist_scanned_contact(image_bytes_list, raw_texts, user_id):
 def scan_business_card(event, context, cors_headers):
     try:
         body = json.loads(event['body'])
-        user_id = body.get('userId', 'anonymous')
+        user_id, auth_error = require_user(event, cors_headers, body=body)
+        if auth_error:
+            return auth_error
         images = body.get('images', [])
         raw_texts = body.get('rawTexts') or body.get('raw_texts') or []
         two_sided = bool(body.get('twoSided') or body.get('two_sided'))
@@ -473,10 +546,50 @@ def merge_card_dicts(*sources):
 
 
 def public_scan_card(card_data):
+    return contact_for_client(card_data)
+
+
+def contact_for_client(card_data):
+    """Return contact metadata only — never embed image bytes in API payloads."""
+    if not card_data:
+        return card_data
     public_card = dict(card_data)
-    for key in ('imageUrl', 'backImageUrl'):
-        if str(public_card.get(key) or '').startswith('data:'):
-            public_card[key] = ''
+    for key in (
+        'frontImage', 'backImage', 'originalImageUrl', 'originalBackImageUrl',
+        'cachedImageUrl', 'imageDataUrl',
+    ):
+        public_card.pop(key, None)
+
+    card_id = public_card.get('cardId')
+    user_id = public_card.get('userId')
+    front_ref = str(public_card.get('imageUrl') or '')
+    back_ref = str(public_card.get('backImageUrl') or '')
+
+    has_front = bool(front_ref) and not front_ref.startswith('data:')
+    has_back = bool(back_ref) and not back_ref.startswith('data:')
+    if front_ref.startswith('data:'):
+        has_front = True
+    if back_ref.startswith('data:'):
+        has_back = True
+    if not has_front and user_id and card_id and hasattr(table, 'has_card_image'):
+        try:
+            has_front = bool(table.has_card_image(user_id, card_id, 'front'))
+        except Exception:
+            has_front = False
+    if not has_back and user_id and card_id and hasattr(table, 'has_card_image'):
+        try:
+            has_back = bool(table.has_card_image(user_id, card_id, 'back'))
+        except Exception:
+            has_back = False
+
+    public_card['imageUrl'] = 'db:front' if has_front else ''
+    if has_back:
+        public_card['backImageUrl'] = 'db:back'
+    else:
+        public_card.pop('backImageUrl', None)
+
+    public_card['hasImage'] = bool(has_front)
+    public_card['hasBackImage'] = bool(has_back)
     return public_card
 
 
@@ -531,27 +644,9 @@ def gemini_image_parts(image_bytes_list):
     return parts
 
 
-def extract_card_with_gemini(image_bytes_list):
-    images = [img for img in (image_bytes_list or []) if img]
-    if not images:
-        return {}, ''
-    sides_note = (
-        'These photos are the FRONT then BACK of the same business card. Read both sides.'
-        if len(images) > 1 else
-        'Read every visible character on this business card.'
-    )
-    prompt = (
-        f'{sides_note} Extract contact details even if they are small, rotated, on a dark background, '
-        'or split across sides. Return JSON only with keys: '
-        'name, company, department, title, email, phone, address, website, industry, rawText. '
-        'phone may include multiple numbers separated by " / ". '
-        f'industry must be one of: {INDUSTRY_OPTIONS}. '
-        'rawText must contain all readable text, with FRONT/BACK labels when both sides are present. '
-        'Leave unknown keys empty. Do not invent details.'
-    )
-    text = gemini_generate([{'text': prompt}, *gemini_image_parts(images)])
+def parse_model_card_json(text):
     parsed = {}
-    raw_text = text
+    raw_text = text or ''
     try:
         payload = json.loads(strip_json_fence(text))
         if isinstance(payload, dict):
@@ -562,6 +657,73 @@ def extract_card_with_gemini(image_bytes_list):
     return parsed, (raw_text or '').strip()
 
 
+def card_vision_prompt(image_count):
+    sides_note = (
+        'These photos are the FRONT then BACK of the same business card. Read both sides.'
+        if image_count > 1 else
+        'Read every visible character on this business card.'
+    )
+    return (
+        f'{sides_note} Extract contact details even if they are small, rotated, on a dark background, '
+        'white-on-black, glossy, or split across sides. Read digits carefully: do not swap 8/0/9 or +91/+01. '
+        'Keep Indian mobiles as +91 followed by 10 digits. Keep the full address including PIN code and landmark. '
+        'Return JSON only with keys: '
+        'name, company, department, title, email, phone, address, website, industry, rawText. '
+        'phone may include multiple numbers separated by " / ". '
+        f'industry must be one of: {INDUSTRY_OPTIONS}. '
+        'rawText must contain all readable text, with FRONT/BACK labels when both sides are present. '
+        'Leave unknown keys empty. Do not invent details.'
+    )
+
+
+def extract_card_with_openrouter(image_bytes_list):
+    images = [img for img in (image_bytes_list or []) if img]
+    if not openrouter_client or not images:
+        return {}, ''
+    prompt = card_vision_prompt(len(images))
+    content = [{'type': 'text', 'text': prompt}]
+    for image_bytes in images:
+        encoded = base64.b64encode(image_bytes).decode('utf-8')
+        content.append({
+            'type': 'image_url',
+            'image_url': {'url': f'data:image/jpeg;base64,{encoded}'},
+        })
+    preferred = os.environ.get('OPENROUTER_VISION_MODEL') or 'google/gemini-2.5-flash'
+    candidates = [
+        preferred,
+        'google/gemini-2.0-flash-001',
+        'openai/gpt-4o-mini',
+        'qwen/qwen2.5-vl-32b-instruct',
+    ]
+    seen = []
+    for model in candidates:
+        if not model or model in seen:
+            continue
+        seen.append(model)
+        try:
+            completion = openrouter_client.chat.completions.create(
+                model=model,
+                messages=[{'role': 'user', 'content': content}],
+                temperature=0,
+                max_tokens=1200,
+            )
+            text = (completion.choices[0].message.content or '').strip()
+            if text:
+                logger.info('OpenRouter vision used model %s', model)
+                return parse_model_card_json(text)
+        except Exception as err:
+            logger.warning('OpenRouter vision %s failed: %s', model, err)
+    return {}, ''
+
+
+def extract_card_with_gemini(image_bytes_list):
+    images = [img for img in (image_bytes_list or []) if img]
+    if not images:
+        return {}, ''
+    text = gemini_generate([{'text': card_vision_prompt(len(images))}, *gemini_image_parts(images)])
+    return parse_model_card_json(text)
+
+
 def extract_text_with_gemini(image_bytes):
     _parsed, text = extract_card_with_gemini([image_bytes] if image_bytes else [])
     return text
@@ -569,9 +731,11 @@ def extract_text_with_gemini(image_bytes):
 
 def extract_card_text_sources(image_bytes, client_text='', extra_images=None):
     images = [image_bytes, *(extra_images or [])]
-    vision_data, gemini_text = extract_card_with_gemini(images)
+    vision_data, vision_text = extract_card_with_openrouter(images)
+    if not card_data_filled(vision_data) and not (vision_text or '').strip():
+        vision_data, vision_text = extract_card_with_gemini(images)
     textract_texts = [extract_text_with_textract(image) for image in images if image]
-    merged = merge_ocr_texts(gemini_text, *textract_texts, client_text)
+    merged = merge_ocr_texts(vision_text, *textract_texts, client_text)
     if ocr_quality_score(merged) < 0:
         logger.warning('No server OCR available; continuing with client text only')
         return vision_data, (client_text or '').strip()
@@ -683,13 +847,19 @@ def parse_with_deepseek(raw_text):
         "For industry categorization, consider both the company name and title. "
         "Do not include any additional text outside the JSON object."
     )
-    if not (raw_text or '').strip() or not os.environ.get('DEEPSEEK_API_KEY'):
-        if not os.environ.get('DEEPSEEK_API_KEY'):
-            logger.warning('DEEPSEEK_API_KEY is not set; using local parser')
+    if not (raw_text or '').strip():
         return parse_card_text_locally(raw_text)
+    llm_client = openrouter_client if env_any('OPENROUTER_API_KEY', 'openrouter_api_key') else None
+    model = os.environ.get('OPENROUTER_TEXT_MODEL') or 'google/gemini-2.0-flash-001'
+    if llm_client is None:
+        if not os.environ.get('DEEPSEEK_API_KEY'):
+            logger.warning('No OpenRouter or DeepSeek key; using local parser')
+            return parse_card_text_locally(raw_text)
+        llm_client = client
+        model = 'deepseek-chat'
     try:
-        completion = client.chat.completions.create(
-            model="deepseek-chat",
+        completion = llm_client.chat.completions.create(
+            model=model,
             messages=[
                 {"role": "system", "content": "You are an expert data extraction assistant tasked with parsing raw text from business cards and categorizing industries."},
                 {"role": "user", "content": f"{prompt}\n\nText:\n{raw_text}"}
@@ -711,8 +881,14 @@ def parse_with_deepseek(raw_text):
 def get_contacts(event, cors_headers):
     try:
         params = event.get('queryStringParameters') or {}
-        user_id = params.get('userId', 'anonymous')
-        items = [item for item in table.query_by_user(user_id) if not is_profile_record(item)]
+        user_id, auth_error = require_user(event, cors_headers, params=params)
+        if auth_error:
+            return auth_error
+        items = [
+            contact_for_client(item)
+            for item in table.query_by_user(user_id)
+            if not is_profile_record(item)
+        ]
         return {
             'statusCode': 200,
             'body': json.dumps(items),
@@ -729,7 +905,9 @@ def get_contacts(event, cors_headers):
 def get_network_analysis(event, cors_headers):
     try:
         params = event.get('queryStringParameters') or {}
-        user_id = params.get('userId') or (event.get('headers') or {}).get('userId') or 'anonymous'
+        user_id, auth_error = require_user(event, cors_headers, params=params)
+        if auth_error:
+            return auth_error
         contacts = [item for item in table.query_by_user(user_id) if not is_profile_record(item)]
 
         nodes = []
@@ -799,14 +977,9 @@ def get_network_analysis(event, cors_headers):
 def delete_all_contacts(event, cors_headers):
     try:
         body = json.loads(event['body'])
-        user_id = body.get('userId')
-        
-        if not user_id:
-            return {
-                'statusCode': 400,
-                'body': json.dumps({'error': 'userId is required'}),
-                'headers': cors_headers
-            }
+        user_id, auth_error = require_user(event, cors_headers, body=body)
+        if auth_error:
+            return auth_error
 
         items = table.query_by_user(user_id)
         deleted_count = 0
@@ -836,9 +1009,9 @@ def delete_all_contacts(event, cors_headers):
 def delete_contact(event, cors_headers):
     try:
         card_id = (event.get('pathParameters') or {}).get('cardId')
-        user_id = (event.get('queryStringParameters') or {}).get('userId')
-        if not user_id:
-            raise KeyError("userId is required")
+        user_id, auth_error = require_user(event, cors_headers, params=event.get('queryStringParameters') or {})
+        if auth_error:
+            return auth_error
         if not card_id:
             raise KeyError("cardId is required")
 
@@ -869,9 +1042,9 @@ def update_contact(event, cors_headers):
     """Update a specific contact card."""
     try:
         card_id = (event.get('pathParameters') or {}).get('cardId')
-        user_id = (event.get('queryStringParameters') or {}).get('userId')
-        if not user_id:
-            raise KeyError("userId is required")
+        user_id, auth_error = require_user(event, cors_headers, params=event.get('queryStringParameters') or {})
+        if auth_error:
+            return auth_error
         if not card_id:
             raise KeyError("cardId is required")
 
@@ -926,7 +1099,10 @@ def update_contact(event, cors_headers):
 
         return {
             'statusCode': 200,
-            'body': json.dumps({'message': f"Contact {card_id} updated successfully", 'contact': updated_contact}),
+            'body': json.dumps({
+                'message': f"Contact {card_id} updated successfully",
+                'contact': contact_for_client(updated_contact),
+            }),
             'headers': cors_headers
         }
     except KeyError as e:
@@ -945,6 +1121,11 @@ def update_contact(event, cors_headers):
         }
 
 def delete_stored_image(user_id, card_id):
+    if hasattr(table, 'delete_card_images'):
+        try:
+            table.delete_card_images(user_id, card_id)
+        except Exception as err:
+            logger.warning('Error deleting stored card images: %s', err)
     if not (s3_client and BACKEND_BUCKET_NAME):
         return
     for suffix in ('', '-back'):
@@ -957,41 +1138,66 @@ def delete_stored_image(user_id, card_id):
 
 
 def upload_image_to_s3(image_bytes, card_id, user_id, side='front'):
-    """Upload the original image to S3, or keep a data URL on Vercel."""
-    if not (s3_client and BACKEND_BUCKET_NAME):
-        encoded = base64.b64encode(image_bytes).decode('utf-8')
-        return f'data:image/jpeg;base64,{encoded}'
+    """Upload card image to S3 or durable DB image store (never embed in contact JSON)."""
+    if s3_client and BACKEND_BUCKET_NAME:
+        suffix = '-back' if side == 'back' else ''
+        key = f"{user_id}/cards/{card_id}{suffix}.jpg"
+        try:
+            s3_client.put_object(
+                Bucket=BACKEND_BUCKET_NAME,
+                Key=key,
+                Body=image_bytes,
+                ContentType='image/jpeg'
+            )
+            return f"s3://{BACKEND_BUCKET_NAME}/{key}"
+        except Exception as e:
+            logger.error(f"Error uploading image to S3: {str(e)}")
+            raise e
 
-    suffix = '-back' if side == 'back' else ''
-    key = f"{user_id}/cards/{card_id}{suffix}.jpg"
-    try:
-        s3_client.put_object(
-            Bucket=BACKEND_BUCKET_NAME,
-            Key=key,
-            Body=image_bytes,
-            ContentType='image/jpeg'
-        )
-        return f"s3://{BACKEND_BUCKET_NAME}/{key}"
-    except Exception as e:
-        logger.error(f"Error uploading image to S3: {str(e)}")
-        raise e
+    if hasattr(table, 'put_card_image'):
+        try:
+            return table.put_card_image(user_id, card_id, side, image_bytes, 'image/jpeg')
+        except Exception as err:
+            logger.error('Durable image store failed: %s', err)
+            raise err
+
+    # Last resort — should not happen when Postgres/Blob store is configured
+    encoded = base64.b64encode(image_bytes).decode('utf-8')
+    return f'data:image/jpeg;base64,{encoded}'
 
 
 def get_image(event, cors_headers):
     try:
         card_id = (event.get('pathParameters') or {}).get('cardId')
-        user_id = (event.get('queryStringParameters') or {}).get('userId')
-        
-        if not user_id:
-            raise KeyError("userId is required")
+        user_id, auth_error = require_user(event, cors_headers, params=event.get('queryStringParameters') or {})
+        if auth_error:
+            return auth_error
         if not card_id:
             raise KeyError("cardId is required")
 
         contact = table.get_item(user_id, card_id) or {}
         params = event.get('queryStringParameters') or {}
         side = (params.get('side') or 'front').lower()
+        if side not in ('front', 'back'):
+            side = 'front'
         image_url = contact.get('backImageUrl') if side == 'back' else contact.get('imageUrl')
         image_url = image_url or ''
+
+        # Preferred path: dedicated card_images table / JSON image map
+        if hasattr(table, 'get_card_image'):
+            stored = table.get_card_image(user_id, card_id, side)
+            if stored and stored.get('bytes'):
+                return {
+                    'statusCode': 200,
+                    'headers': {
+                        **cors_headers,
+                        'Content-Type': stored.get('content_type') or 'image/jpeg',
+                        'Cache-Control': 'private, max-age=3600',
+                    },
+                    'body': base64.b64encode(stored['bytes']).decode('ascii'),
+                    'isBase64Encoded': True,
+                }
+
         if image_url.startswith('data:'):
             header, encoded = image_url.split(',', 1)
             mime = 'image/jpeg'
@@ -999,11 +1205,22 @@ def get_image(event, cors_headers):
                 mime = 'image/png'
             elif 'image/webp' in header:
                 mime = 'image/webp'
+            # Migrate legacy embedded images into durable store for next fetch
+            try:
+                if hasattr(table, 'put_card_image'):
+                    raw = base64.b64decode(encoded)
+                    table.put_card_image(user_id, card_id, side, raw, mime)
+                    patched = dict(contact)
+                    patched['imageUrl' if side == 'front' else 'backImageUrl'] = f'db:{side}'
+                    table.put_item(patched)
+            except Exception as migrate_err:
+                logger.warning('Could not migrate legacy data-URL image: %s', migrate_err)
             return {
                 'statusCode': 200,
                 'headers': {
                     **cors_headers,
-                    'Content-Type': mime
+                    'Content-Type': mime,
+                    'Cache-Control': 'private, max-age=3600',
                 },
                 'body': encoded,
                 'isBase64Encoded': True
@@ -1070,13 +1287,9 @@ def generate_vcard_from_body(event, cors_headers):
 def get_own_profile(event, cors_headers):
     try:
         params = event.get('queryStringParameters') or {}
-        user_id = params.get('userId')
-        if not user_id:
-            return {
-                'statusCode': 400,
-                'body': json.dumps({'error': 'userId is required'}),
-                'headers': cors_headers
-            }
+        user_id, auth_error = require_user(event, cors_headers, params=params)
+        if auth_error:
+            return auth_error
         item = table.get_item(user_id, PROFILE_CARD_ID)
         return {
             'statusCode': 200,
@@ -1095,13 +1308,9 @@ def get_own_profile(event, cors_headers):
 def save_profile(event, cors_headers):
     try:
         body = parse_json_body(event)
-        user_id = (body.get('userId') or '').strip()
-        if not user_id:
-            return {
-                'statusCode': 400,
-                'body': json.dumps({'error': 'userId is required'}),
-                'headers': cors_headers
-            }
+        user_id, auth_error = require_user(event, cors_headers, body=body)
+        if auth_error:
+            return auth_error
         if not (body.get('name') or '').strip():
             return {
                 'statusCode': 400,
@@ -1217,10 +1426,9 @@ def get_vcard(event, cors_headers):
     """Generate and return a vCard file for a scanned contact."""
     try:
         card_id = (event.get('pathParameters') or {}).get('cardId') or event.get('path', '').rstrip('/').split('/')[-1]
-        user_id = (event.get('queryStringParameters') or {}).get('userId')
-        
-        if not user_id:
-            raise KeyError("userId is required")
+        user_id, auth_error = require_user(event, cors_headers, params=event.get('queryStringParameters') or {})
+        if auth_error:
+            return auth_error
 
         if card_id == PROFILE_CARD_ID:
             item = lookup_profile(user_id)
@@ -1255,10 +1463,12 @@ def handle_chat_message(event, cors_headers):
     try:
         body = json.loads(event['body'])
         message = body.get('message')
-        user_id = body.get('userId')
+        user_id, auth_error = require_user(event, cors_headers, body=body)
+        if auth_error:
+            return auth_error
         contacts = body.get('contacts', [])
 
-        if not message or not user_id:
+        if not message:
             return {
                 'statusCode': 400,
                 'body': json.dumps({'error': 'Missing required fields'}),
@@ -1286,11 +1496,16 @@ def handle_chat_message(event, cors_headers):
             "If a user's contact need to be included in your response, always start and end with a double line breaks."
         )
 
-        if not os.environ.get('DEEPSEEK_API_KEY'):
-            raise Exception('DEEPSEEK_API_KEY is not set')
+        if not env_any('OPENROUTER_API_KEY', 'openrouter_api_key', 'DEEPSEEK_API_KEY'):
+            raise Exception('OPENROUTER_API_KEY is not set')
+        chat_client = openrouter_client or client
+        chat_model = (
+            (os.environ.get('OPENROUTER_TEXT_MODEL') or 'google/gemini-2.0-flash-001')
+            if openrouter_client else 'deepseek-chat'
+        )
         try:
-            completion = client.chat.completions.create(
-                model="deepseek-chat",
+            completion = chat_client.chat.completions.create(
+                model=chat_model,
                 messages=[
                     {"role": "system", "content": prompt},
                     {"role": "user", "content": f"Here is the user's contact database: {json.dumps(context)}"},

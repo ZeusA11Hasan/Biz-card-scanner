@@ -25,7 +25,8 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="dns-prefetch" href="https://d3js.org">
     <link rel="dns-prefetch" href="https://cdnjs.cloudflare.com">
-    <link rel="preload" href="/styles.css?v=15" as="style">
+    <link rel="preconnect" href="https://accounts.google.com" crossorigin>
+    <link rel="preload" href="/styles.css?v=30" as="style">
     <link rel="preload" href="/android-chrome-192x192.png" as="image">
     <style>
       /* Critical boot splash — paints before CSS bundle */
@@ -59,12 +60,23 @@
         font-family: system-ui, sans-serif;
         font-size: 0.9rem; color: #5c6578;
       }
+      #folioBoot .boot-spinner {
+        width: 28px; height: 28px; margin: 18px auto 0;
+        border: 3px solid rgba(27,42,74,0.15);
+        border-top-color: #1b2a4a;
+        border-radius: 50%;
+        animation: bootSpin 0.8s linear infinite;
+      }
       @keyframes bootPulse {
         0%, 100% { transform: translateY(0); }
         50% { transform: translateY(-4px); }
       }
+      @keyframes bootSpin {
+        to { transform: rotate(360deg); }
+      }
       @media (prefers-reduced-motion: reduce) {
         #folioBoot .boot-mark { animation: none; }
+        #folioBoot .boot-spinner { animation: none; border-top-color: #1b2a4a; }
       }
       /* Card text must stay readable — never CSS-mirror the camera */
       #cameraVideo.camera-panel__video,
@@ -86,16 +98,24 @@
         }
       })();
     </script>
-    <link href="styles.css?v=15" rel="stylesheet">
+    <link href="styles.css?v=30" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/amazon-cognito-identity-js@5.2.3/dist/amazon-cognito-identity.min.js"></script>
 </head>
 <body>
     <div id="folioBoot" aria-hidden="true">
         <div>
             <div class="boot-mark">F</div>
             <div class="boot-word">Folio</div>
-            <div class="boot-sub">Preparing your network…</div>
+            <div id="folioBootSub" class="boot-sub">Checking your session…</div>
+            <div class="boot-spinner" aria-hidden="true"></div>
+        </div>
+    </div>
+
+    <div id="authLoadingOverlay" class="auth-loading hidden" role="status" aria-live="polite" aria-busy="true">
+        <div class="auth-loading__panel">
+            <div class="auth-loading__spinner" aria-hidden="true"></div>
+            <p id="authLoadingTitle" class="auth-loading__title">Signing you in…</p>
+            <p id="authLoadingSub" class="auth-loading__sub">Hang tight — this can take a few seconds.</p>
         </div>
     </div>
 
@@ -126,6 +146,13 @@
         <main class="app-views">
             <!-- Scan -->
             <section id="scanContent" class="view-panel view-panel--scan fade-in">
+                <div class="scan-loader hidden" id="scanLoader" aria-live="polite" aria-busy="true">
+                    <div class="scan-loader__card">
+                        <div class="scan-loader__mark" aria-hidden="true">F</div>
+                        <p class="scan-loader__title" id="scanLoaderTitle">Reading your card</p>
+                        <p class="scan-loader__sub" id="scanLoaderSub">This usually takes a few seconds</p>
+                    </div>
+                </div>
                 <div class="scan-layout">
                 <div class="scan-layout__intro">
                 <div class="hero hero--scan">
@@ -226,20 +253,11 @@
                                 <img class="camera-panel__mascot-hidden" src="assets/mascot-idle.svg" alt="" id="scanMascot">
                             </div>
                             <p class="camera-panel__idle-title">Ready when you are</p>
-                            <p class="camera-panel__idle-sub" id="cameraIdleSub">Tap to open live camera · capture front · add the back if needed</p>
+                            <p class="camera-panel__idle-sub" id="cameraIdleSub">Fit the visiting card inside the rectangle</p>
                         </div>
                     </div>
 
                     <div class="camera-panel__live-ui hidden" id="cameraLiveUi">
-                        <div class="camera-panel__frame camera-panel__frame--live" aria-hidden="true">
-                            <span class="vf vf--tl"></span>
-                            <span class="vf vf--tr"></span>
-                            <span class="vf vf--bl"></span>
-                            <span class="vf vf--br"></span>
-                        </div>
-                        <div class="camera-panel__card-guide camera-panel__card-guide--live" aria-hidden="true">
-                            <span class="camera-panel__scanline" aria-hidden="true"></span>
-                        </div>
                         <div class="camera-panel__side-chip" id="cameraSideChip">Front</div>
                         <div class="camera-panel__flip-bar hidden" id="cameraFlipBar">
                             <img id="cameraFlipThumb" alt="Front of card">
@@ -248,6 +266,14 @@
                                 <span>Flip the card, or skip if this side is enough.</span>
                             </div>
                             <button type="button" class="camera-panel__flip-skip" id="cameraSkipBackBtn">Skip</button>
+                        </div>
+                        <div class="camera-panel__live-stage">
+                            <div class="camera-panel__card-guide camera-panel__card-guide--live" id="cameraCardGuide" aria-hidden="true">
+                                <span class="camera-panel__guide-window">
+                                    <span class="camera-panel__scanline" aria-hidden="true"></span>
+                                </span>
+                            </div>
+                            <p class="camera-panel__align-hint" id="cameraAlignHint">Fit the card inside the rectangle</p>
                         </div>
                         <img class="camera-panel__mascot camera-panel__mascot--live" src="assets/mascot-scanning.svg" alt="" id="scanMascotLive">
                         <div class="camera-panel__bar">
@@ -296,12 +322,12 @@
                 </div>
             </section>
 
-            <!-- Contacts -->
+            <!-- Saved Cards -->
             <section id="contactsContent" class="view-panel hidden">
-                <div class="section-head">
+                <div class="saved-head">
                     <div>
-                        <h2>Contacts</h2>
-                        <p>Your digitized network</p>
+                        <p class="saved-kicker">Your network</p>
+                        <h2>Saved Cards</h2>
                     </div>
                     <div class="section-actions">
                         <button id="exportCsvBtn" class="icon-btn" type="button" title="Export CSV" aria-label="Export CSV">
@@ -327,7 +353,7 @@
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
                         </svg>
-                        <input type="text" id="searchContacts" class="form-input" placeholder="Search contacts...">
+                        <input type="text" id="searchContacts" class="form-input" placeholder="Search saved cards…">
                     </div>
                     <div class="filters-row-scroll">
                         <select id="filterByTag" class="form-select">
@@ -343,24 +369,111 @@
                             <option value="hasReminder">Has reminder</option>
                         </select>
                         <select id="sortContacts" class="form-select">
+                            <option value="dateDesc">Newest</option>
                             <option value="nameAsc">Name (A-Z)</option>
                             <option value="nameDesc">Name (Z-A)</option>
                             <option value="companyAsc">Company (A-Z)</option>
                             <option value="companyDesc">Company (Z-A)</option>
-                            <option value="dateDesc">Newest</option>
                             <option value="dateAsc">Oldest</option>
                         </select>
                     </div>
                 </div>
                 <p id="followUpHint" class="follow-up-hint hidden"></p>
 
-                <div id="contactsList"></div>
-                <div id="noContacts" class="empty-state hidden">
-                    <div class="speech-bubble">Scan a card — I'll keep it safe.</div>
-                    <img src="assets/mascot-idle.svg" alt="">
-                    <p>No contacts yet. Start with Scan.</p>
+                <div id="contactsList" class="saved-list"></div>
+                <div id="noContacts" class="saved-empty hidden">
+                    <div class="saved-empty__mark" aria-hidden="true">
+                        <svg viewBox="0 0 64 40" fill="none"><rect x="4" y="6" width="56" height="28" rx="6" stroke="currentColor" stroke-width="2.4"/><path d="M14 16h18M14 22h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                    </div>
+                    <h3>No saved cards yet</h3>
+                    <p>Scan a business card to build your digital network.</p>
+                    <button type="button" class="btn-luxury" id="emptyScanBtn">
+                        <span>Scan Business Card</span>
+                    </button>
                 </div>
             </section>
+
+            <section id="contactDetailView" class="card-detail hidden" aria-hidden="true">
+                <header class="card-detail__top">
+                    <button type="button" class="icon-btn" id="contactDetailBack" aria-label="Back to saved cards">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
+                        </svg>
+                    </button>
+                    <div>
+                        <p class="card-detail__kicker">Card details</p>
+                        <h2 id="contactDetailTitle">Saved card</h2>
+                    </div>
+                    <button type="button" class="icon-btn" id="contactDetailMore" aria-label="More options">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6h.01M12 12h.01M12 18h.01"/>
+                        </svg>
+                    </button>
+                </header>
+                <div class="card-detail__scroll">
+                    <div class="flip-stage" id="contactDetailFlipStage">
+                        <button type="button" class="flip-card" id="contactDetailFlipCard" aria-label="Tap to flip card">
+                            <span class="flip-card__face flip-card__face--front">
+                                <img id="contactDetailPhoto" alt="Front of visiting card">
+                            </span>
+                            <span class="flip-card__face flip-card__face--back">
+                                <img id="contactDetailPhotoBack" alt="Back of visiting card">
+                            </span>
+                        </button>
+                        <p class="flip-stage__hint" id="contactDetailFlipHint">Front</p>
+                    </div>
+                    <div id="contactDetailIdentity" class="card-detail__identity"></div>
+                    <div class="card-detail__actions" id="contactDetailQuick"></div>
+                    <div id="contactDetailFields" class="card-detail__sections"></div>
+                    <article id="contactDetailCard" class="hidden" hidden></article>
+                    <button type="button" class="chip-btn hidden" id="contactDetailFlip" hidden>Flip</button>
+                    <button type="button" class="chip-btn hidden" id="contactDetailEdit" hidden>Edit</button>
+                    <div class="card-detail__danger">
+                        <button type="button" class="chip-btn chip-btn--danger" id="contactDetailDelete">Delete card</button>
+                    </div>
+                </div>
+            </section>
+
+            <div id="cardPhotoLightbox" class="card-photo-lightbox hidden" aria-hidden="true" role="dialog" aria-label="Visiting card photo">
+                <button type="button" class="card-photo-lightbox__close" id="cardPhotoLightboxClose" aria-label="Close photo">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                    </svg>
+                </button>
+                <img id="cardPhotoLightboxImg" alt="Visiting card">
+            </div>
+
+            <div id="scanReview" class="scan-review hidden" aria-hidden="true">
+                <header class="scan-review__top">
+                    <button type="button" class="icon-btn" id="scanReviewClose" aria-label="Close review">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                        </svg>
+                    </button>
+                    <div>
+                        <p class="card-detail__kicker">Review</p>
+                        <h2>Digital card</h2>
+                    </div>
+                </header>
+                <div class="scan-review__scroll">
+                    <div class="scan-review__sides">
+                        <figure>
+                            <img id="scanReviewFront" alt="Cropped front">
+                            <figcaption>Front</figcaption>
+                        </figure>
+                        <figure id="scanReviewBackWrap" class="hidden">
+                            <img id="scanReviewBack" alt="Cropped back">
+                            <figcaption>Back</figcaption>
+                        </figure>
+                    </div>
+                    <p id="scanReviewStatus" class="scan-review__status">Reading the card…</p>
+                    <div id="scanReviewFields" class="card-detail__sections"></div>
+                </div>
+                <div class="scan-review__bar">
+                    <button type="button" class="chip-btn" id="scanReviewEdit">Edit details</button>
+                    <button type="button" class="btn-luxury" id="scanReviewSave"><span>Save Card</span></button>
+                </div>
+            </div>
 
             <!-- Network -->
             <section id="networkContent" class="view-panel hidden">
@@ -667,14 +780,14 @@
                 </span>
                 <span class="pill-nav__label">Scan</span>
             </button>
-            <button id="contactsTab" class="pill-nav__item" type="button" aria-label="Contacts">
+            <button id="contactsTab" class="pill-nav__item" type="button" aria-label="Saved Cards">
                 <span class="pill-nav__icon">
                     <svg class="nav-ico" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                         <circle class="nav-ico__head" cx="12" cy="8" r="3.2" stroke="currentColor" stroke-width="1.8"/>
                         <path class="nav-ico__body" d="M5.5 19.5c1.2-3.2 3.4-4.8 6.5-4.8s5.3 1.6 6.5 4.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
                     </svg>
                 </span>
-                <span class="pill-nav__label">Contacts</span>
+                <span class="pill-nav__label">Saved</span>
             </button>
             <button id="networkTab" class="pill-nav__item" type="button" aria-label="Network">
                 <span class="pill-nav__icon">
@@ -704,23 +817,37 @@
         <div id="signInModal" class="modal-overlay hidden">
             <div class="modal-content sheet">
                 <div class="sheet-body">
-                    <h3 style="margin-bottom:16px;">Sign In</h3>
+                    <h3 id="signInTitle" style="margin-bottom:8px;">Sign in</h3>
+                    <p class="hero-sub" style="margin:0 0 16px;">Create an account so scanned cards stay after you refresh.</p>
+                    <div id="googleSignInWrap" class="google-sign-in hidden">
+                        <button type="button" id="googleSignInBtn" class="google-sign-in__btn">
+                            <svg class="google-sign-in__icon" viewBox="0 0 24 24" aria-hidden="true">
+                                <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                                <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                                <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+                                <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+                            </svg>
+                            <span>Continue with Google</span>
+                        </button>
+                        <div class="google-sign-in__divider" role="separator">or</div>
+                    </div>
                     <form id="signInForm">
                         <div class="field">
                             <label for="username">Username</label>
-                            <input type="text" id="username" class="form-input" placeholder="Username" required>
+                            <input type="text" id="username" class="form-input" placeholder="Username" autocomplete="username" required>
                         </div>
                         <div class="field">
                             <label for="password">Password</label>
-                            <input type="password" id="password" class="form-input" placeholder="Password" required>
+                            <input type="password" id="password" class="form-input" placeholder="Password" autocomplete="current-password" required>
                         </div>
                         <button type="submit" class="btn-luxury" style="margin-top:8px;">
                             <span class="btn-luxury__disc">
                                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"/></svg>
                             </span>
-                            <span>Continue</span>
+                            <span id="signInSubmitLabel">Continue</span>
                         </button>
                     </form>
+                    <button type="button" id="signInModeToggle" class="sign-in-switch">Need an account? Create one</button>
                     <p id="signInError" class="hidden"></p>
                 </div>
             </div>
@@ -971,6 +1098,7 @@
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.js"></script>
-    <script src="script.js?v=15"></script>
+    <script src="card-crop.js?v=29"></script>
+    <script src="script.js?v=30"></script>
 </body>
 </html>

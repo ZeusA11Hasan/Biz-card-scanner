@@ -1,16 +1,12 @@
 const API_URL = window.FOLIO_API_URL || '/api';
-const poolData = {
-    UserPoolId: 'ap-southeast-1_U29IJAttm',
-    ClientId: '1jpbte6se46l27in59aiuc3lnv',
-};
-// TEMP: set false to re-enable Cognito sign-in
-const AUTH_DISABLED = true;
+const AUTH_TOKEN_KEY = 'folio_auth_token';
+const AUTH_COOKIE_KEY = 'folio_token';
+const AUTH_USER_CACHE_KEY = 'folio_auth_user';
+const AUTH_MAX_AGE = 90 * 24 * 60 * 60;
 const TEMP_USER_ID = 'local-dev-user';
 // API Configuration done by deploy.sh (assumed to be injected via deploy.sh)
 document.addEventListener('DOMContentLoaded', () => {
     console.log('DOM fully loaded');
-
-    const userPool = new AmazonCognitoIdentity.CognitoUserPool(poolData);
 
     // Initialize contacts array in memory
     let contactsData = [];
@@ -18,6 +14,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Initialize chart objects
     window.companyDistributionChart = null;
     window.industryInsightsChart = null;
+    let authReady = false;
+    let authCheckPromise = null;
+    let initializeAppPromise = null;
     
     // Check if Chart.js is available
     if (typeof Chart === 'undefined') {
@@ -261,16 +260,25 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    function contactsCacheKey() {
+        return `user:${userId || TEMP_USER_ID}`;
+    }
+
     async function cacheContactsSnapshot(contacts) {
         try {
             const db = await openContactsIdb();
+            const ownerId = userId || TEMP_USER_ID;
             await new Promise((resolve, reject) => {
                 const tx = db.transaction(CONTACTS_IDB_STORE, 'readwrite');
-                tx.objectStore(CONTACTS_IDB_STORE).put({
-                    userId: userId || TEMP_USER_ID,
+                const store = tx.objectStore(CONTACTS_IDB_STORE);
+                const payload = {
+                    userId: ownerId,
                     contacts,
                     savedAt: Date.now(),
-                }, 'latest');
+                };
+                store.put(payload, contactsCacheKey());
+                // Keep legacy key in sync for older builds, but always scoped to current user.
+                store.put(payload, 'latest');
                 tx.oncomplete = () => resolve();
                 tx.onerror = () => reject(tx.error);
             });
@@ -283,14 +291,31 @@ document.addEventListener('DOMContentLoaded', () => {
     async function loadCachedContactsSnapshot() {
         try {
             const db = await openContactsIdb();
+            const ownerId = userId || TEMP_USER_ID;
             const record = await new Promise((resolve, reject) => {
                 const tx = db.transaction(CONTACTS_IDB_STORE, 'readonly');
-                const req = tx.objectStore(CONTACTS_IDB_STORE).get('latest');
-                req.onsuccess = () => resolve(req.result);
+                const store = tx.objectStore(CONTACTS_IDB_STORE);
+                const req = store.get(contactsCacheKey());
+                req.onsuccess = () => {
+                    if (req.result) {
+                        resolve(req.result);
+                        return;
+                    }
+                    // Fallback for older caches — only use if same signed-in user.
+                    const legacy = store.get('latest');
+                    legacy.onsuccess = () => resolve(legacy.result);
+                    legacy.onerror = () => reject(legacy.error);
+                };
                 req.onerror = () => reject(req.error);
             });
             db.close();
-            if (record && Array.isArray(record.contacts)) return record.contacts;
+            if (
+                record
+                && Array.isArray(record.contacts)
+                && (record.userId === ownerId || (!record.userId && ownerId === TEMP_USER_ID))
+            ) {
+                return record.contacts;
+            }
         } catch (e) {
             console.warn('Could not load cached contacts:', e);
         }
@@ -324,6 +349,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const signInModal = document.getElementById('signInModal');
     const signInForm = document.getElementById('signInForm');
     const signInError = document.getElementById('signInError');
+    const signInTitle = document.getElementById('signInTitle');
+    const signInSubmitLabel = document.getElementById('signInSubmitLabel');
+    const signInModeToggle = document.getElementById('signInModeToggle');
+    const googleSignInWrap = document.getElementById('googleSignInWrap');
+    const googleSignInBtn = document.getElementById('googleSignInBtn');
+    let signInIsRegister = false;
+    let googleTokenClient = null;
+    let googleSignInSetupPromise = null;
     const signOutBtn = document.getElementById('signOutBtn');
     const toast = document.getElementById('toast');
     const toastMessage = document.getElementById('toastMessage');
@@ -441,9 +474,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const response = await fetch(`${API_URL}/chat`, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
+                headers: authHeaders(),
                 body: JSON.stringify({
                     message,
                     userId,
@@ -562,6 +593,23 @@ document.addEventListener('DOMContentLoaded', () => {
         if (mascotLive) mascotLive.src = src;
     }
 
+    function setScanProcessing(active, title, sub) {
+        document.body.classList.toggle('scan-processing', !!active);
+        const loader = document.getElementById('scanLoader');
+        loader?.classList.toggle('hidden', !active);
+        if (title) {
+            const titleEl = document.getElementById('scanLoaderTitle');
+            if (titleEl) titleEl.textContent = title;
+        }
+        if (sub) {
+            const subEl = document.getElementById('scanLoaderSub');
+            if (subEl) subEl.textContent = sub;
+        }
+        if (active) {
+            document.body.classList.remove('camera-live');
+        }
+    }
+
     function celebrateScanSuccess() {
         if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
         const burst = document.createElement('div');
@@ -584,36 +632,308 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Authentication Functions
-    async function isAuthenticated() {
-        if (AUTH_DISABLED) {
-            userId = TEMP_USER_ID;
-            return true;
-        }
-        return new Promise((resolve) => {
-            const cognitoUser = userPool.getCurrentUser();
-            if (cognitoUser) {
-                cognitoUser.getSession((err, session) => {
-                    if (err || !session.isValid()) {
-                        resolve(false);
-                    } else {
-                        userId = session.getIdToken().payload.sub; // Store userId (sub)
-                        resolve(true);
-                    }
-                });
-            } else {
-                resolve(false);
+    function readAuthCookie() {
+        try {
+            const parts = (document.cookie || '').split(';');
+            for (let i = 0; i < parts.length; i += 1) {
+                const [name, ...rest] = parts[i].trim().split('=');
+                if (name === AUTH_COOKIE_KEY) {
+                    return decodeURIComponent(rest.join('=') || '');
+                }
             }
+        } catch (e) { /* ignore */ }
+        return '';
+    }
+
+    function writeAuthCookie(token) {
+        try {
+            const secure = window.location.protocol === 'https:' ? '; Secure' : '';
+            if (token) {
+                document.cookie = `${AUTH_COOKIE_KEY}=${encodeURIComponent(token)}; Path=/; Max-Age=${AUTH_MAX_AGE}; SameSite=Lax${secure}`;
+            } else {
+                document.cookie = `${AUTH_COOKIE_KEY}=; Path=/; Max-Age=0; SameSite=Lax${secure}`;
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    function getAuthToken() {
+        try {
+            const stored = localStorage.getItem(AUTH_TOKEN_KEY) || '';
+            if (stored) return stored;
+        } catch (e) { /* ignore */ }
+        return readAuthCookie();
+    }
+
+    function setAuthToken(token) {
+        try {
+            if (token) localStorage.setItem(AUTH_TOKEN_KEY, token);
+            else localStorage.removeItem(AUTH_TOKEN_KEY);
+        } catch (e) { /* ignore */ }
+        writeAuthCookie(token || '');
+    }
+
+    function readCachedAuthUser() {
+        try {
+            const raw = localStorage.getItem(AUTH_USER_CACHE_KEY);
+            if (!raw) return null;
+            const user = JSON.parse(raw);
+            return user && user.id ? user : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function cacheAuthUser(user) {
+        try {
+            if (user?.id) localStorage.setItem(AUTH_USER_CACHE_KEY, JSON.stringify(user));
+            else localStorage.removeItem(AUTH_USER_CACHE_KEY);
+        } catch (e) { /* ignore */ }
+    }
+
+    function hasStoredSessionHint() {
+        return Boolean(getAuthToken() || readCachedAuthUser()?.id);
+    }
+
+    function setBootStatus(message) {
+        const sub = document.getElementById('folioBootSub');
+        if (sub && message) sub.textContent = message;
+    }
+
+    function showAuthLoading(title, subtitle) {
+        const overlay = document.getElementById('authLoadingOverlay');
+        const titleEl = document.getElementById('authLoadingTitle');
+        const subEl = document.getElementById('authLoadingSub');
+        if (titleEl && title) titleEl.textContent = title;
+        if (subEl && subtitle) subEl.textContent = subtitle;
+        overlay?.classList.remove('hidden');
+        document.body.style.overflow = 'hidden';
+    }
+
+    function hideAuthLoading() {
+        document.getElementById('authLoadingOverlay')?.classList.add('hidden');
+        if (signInModal?.classList.contains('hidden')) {
+            document.body.style.overflow = '';
+        }
+    }
+
+    function authHeaders(extra) {
+        const headers = Object.assign({ 'Content-Type': 'application/json' }, extra || {});
+        const token = getAuthToken();
+        if (token) headers.Authorization = `Bearer ${token}`;
+        return headers;
+    }
+
+    function applyAuthUser(user, token) {
+        if (token) setAuthToken(token);
+        userId = user?.id || null;
+        window.userId = userId;
+        if (user?.id) cacheAuthUser(user);
+        if (userId) signOutBtn?.classList.remove('hidden');
+    }
+
+    function clearAuthSession() {
+        setAuthToken('');
+        cacheAuthUser(null);
+        userId = null;
+        window.userId = null;
+        contactsData = [];
+        signOutBtn?.classList.add('hidden');
+    }
+
+    async function fetchAuthMe(useBearer) {
+        const headers = useBearer
+            ? authHeaders()
+            : { 'Content-Type': 'application/json' };
+        return fetch(`${API_URL}/auth/me`, {
+            headers,
+            credentials: 'include',
         });
     }
 
+    async function isAuthenticated() {
+        if (authCheckPromise) return authCheckPromise;
+        authCheckPromise = (async () => {
+            try {
+                let response = await fetchAuthMe(true);
+                // Stale local Bearer can shadow a valid HttpOnly cookie — retry cookie-only.
+                if (response.status === 401 && getAuthToken()) {
+                    setAuthToken('');
+                    response = await fetchAuthMe(false);
+                }
+                if (!response.ok) {
+                    if (response.status === 401) clearAuthSession();
+                    return false;
+                }
+                const data = await response.json();
+                applyAuthUser(data.user, data.token);
+                return Boolean(data.user?.id);
+            } catch (err) {
+                console.warn('Auth check failed', err);
+                // Offline / cold-start: keep cached session so refresh doesn't force login.
+                const cached = readCachedAuthUser();
+                const token = getAuthToken();
+                if (cached?.id && token) {
+                    applyAuthUser(cached, token);
+                    return true;
+                }
+                return Boolean(token);
+            } finally {
+                authCheckPromise = null;
+            }
+        })();
+        return authCheckPromise;
+    }
+
+    function setSignInMode(isRegister) {
+        signInIsRegister = Boolean(isRegister);
+        if (signInTitle) signInTitle.textContent = signInIsRegister ? 'Create account' : 'Sign in';
+        if (signInSubmitLabel) signInSubmitLabel.textContent = signInIsRegister ? 'Create account' : 'Continue';
+        if (signInModeToggle) {
+            signInModeToggle.textContent = signInIsRegister
+                ? 'Already have an account? Sign in'
+                : 'Need an account? Create one';
+        }
+        signInError?.classList.add('hidden');
+    }
+
     function showSignInModal() {
-        if (AUTH_DISABLED) return;
+        setSignInMode(false);
+        hideAuthLoading();
         signInModal.classList.remove('hidden');
         signInError.classList.add('hidden');
+        setupGoogleSignIn();
     }
 
     function hideSignInModal() {
         signInModal.classList.add('hidden');
+    }
+
+    function finishAuthenticatedSession(user, token, toastMsg) {
+        applyAuthUser(user, token);
+        hideAuthLoading();
+        hideSignInModal();
+        switchToTab('scan');
+        loadContacts().catch((error) => {
+            console.error('Error loading contacts in background:', error);
+            showToast('Error loading contacts after sign in', 'error');
+        });
+        if (toastMsg) showToast(toastMsg, 'success');
+    }
+
+    function loadGoogleIdentityScript() {
+        if (window.google?.accounts?.oauth2) return Promise.resolve();
+        return new Promise((resolve, reject) => {
+            const existing = document.querySelector('script[data-folio-gsi="1"]');
+            if (existing) {
+                existing.addEventListener('load', () => resolve(), { once: true });
+                existing.addEventListener('error', () => reject(new Error('Failed to load Google')), { once: true });
+                return;
+            }
+            const script = document.createElement('script');
+            script.src = 'https://accounts.google.com/gsi/client';
+            script.async = true;
+            script.dataset.folioGsi = '1';
+            script.onload = () => resolve();
+            script.onerror = () => reject(new Error('Failed to load Google'));
+            document.head.appendChild(script);
+        });
+    }
+
+    function showSignInError(message) {
+        if (!signInError) return;
+        signInError.textContent = message;
+        signInError.classList.remove('hidden');
+    }
+
+    async function completeGoogleSignIn(payload) {
+        showAuthLoading('Signing you in…', 'Connecting your Google account. This can take a few seconds.');
+        try {
+            const response = await fetch(`${API_URL}/auth/google`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify(payload),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || 'Google sign-in failed');
+            }
+            finishAuthenticatedSession(data.user, data.token, 'Signed in with Google');
+        } catch (error) {
+            hideAuthLoading();
+            throw error;
+        }
+    }
+
+    async function setupGoogleSignIn() {
+        if (googleSignInSetupPromise) return googleSignInSetupPromise;
+        googleSignInSetupPromise = (async () => {
+            if (!googleSignInWrap || !googleSignInBtn) return;
+            const response = await fetch(`${API_URL}/auth/config`);
+            const config = await response.json().catch(() => ({}));
+            const clientId = (config.googleClientId || '').trim();
+            if (!clientId) {
+                googleSignInWrap.classList.add('hidden');
+                return;
+            }
+            await loadGoogleIdentityScript();
+            if (!window.google?.accounts?.oauth2) {
+                throw new Error('Google sign-in is unavailable');
+            }
+            googleTokenClient = window.google.accounts.oauth2.initTokenClient({
+                client_id: clientId,
+                scope: 'openid email profile',
+                callback: async (tokenResponse) => {
+                    googleSignInBtn.disabled = false;
+                    if (tokenResponse.error) {
+                        hideAuthLoading();
+                        if (tokenResponse.error === 'popup_closed_by_user' || tokenResponse.error === 'access_denied') {
+                            return;
+                        }
+                        showSignInError('Google sign-in failed');
+                        return;
+                    }
+                    try {
+                        await completeGoogleSignIn({ accessToken: tokenResponse.access_token });
+                    } catch (error) {
+                        console.error('Google sign-in error', error);
+                        hideAuthLoading();
+                        showSignInError(error.message || 'Google sign-in failed');
+                    }
+                },
+                error_callback: (error) => {
+                    googleSignInBtn.disabled = false;
+                    hideAuthLoading();
+                    const type = error?.type || error?.message || '';
+                    if (String(type).includes('popup_closed') || String(type).includes('popup_closed_by_user')) {
+                        return;
+                    }
+                    showSignInError('Google sign-in failed');
+                },
+            });
+            if (!googleSignInBtn.dataset.bound) {
+                googleSignInBtn.dataset.bound = '1';
+                googleSignInBtn.addEventListener('click', () => {
+                    signInError?.classList.add('hidden');
+                    if (!googleTokenClient) {
+                        showSignInError('Google sign-in is not ready yet');
+                        return;
+                    }
+                    googleSignInBtn.disabled = true;
+                    showAuthLoading('Opening Google…', 'Choose your account, then we\'ll finish signing you in.');
+                    googleTokenClient.requestAccessToken({ prompt: 'select_account' });
+                    window.setTimeout(() => {
+                        googleSignInBtn.disabled = false;
+                    }, 8000);
+                });
+            }
+            googleSignInWrap.classList.remove('hidden');
+        })().catch((error) => {
+            console.warn('Google sign-in unavailable', error);
+            googleSignInSetupPromise = null;
+            googleSignInWrap?.classList.add('hidden');
+        });
+        return googleSignInSetupPromise;
     }
 
     function setNavCurrent(activeBtn) {
@@ -645,8 +965,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Tab Switching with Authentication
     async function switchToTab(tab) {
-        if (await isAuthenticated()) {
+        // Trust in-memory session; only hit the network when we have no user yet.
+        const authenticated = userId ? true : await isAuthenticated();
+        if (authenticated) {
             hideChat();
+            closeContactDetail();
             document.body.classList.remove('is-public-card');
             // First, update UI immediately to show the selected tab content
             [scanTab, contactsTab, networkTab].forEach(t => t.classList.remove('tab-active'));
@@ -890,148 +1213,435 @@ document.addEventListener('DOMContentLoaded', () => {
             .replace(/'/g, "&#039;");
     }
 
-    // Function to update contact card with compressed image
+    function normalizeSavedCard(contact) {
+        if (!contact) return contact;
+        const front = contact.frontImage || contact.originalImageUrl || contact.cachedImageUrl || contact.imageUrl || '';
+        const back = contact.backImage || contact.originalBackImageUrl || contact.backImageUrl || '';
+        contact.frontImage = front;
+        contact.backImage = back;
+        contact.originalImageUrl = contact.originalImageUrl || front;
+        contact.originalBackImageUrl = contact.originalBackImageUrl || back;
+        contact.jobTitle = contact.jobTitle || contact.title || '';
+        contact.title = contact.title || contact.jobTitle || '';
+        contact.createdAt = contact.createdAt || contact.dateAdded || '';
+        contact.dateAdded = contact.dateAdded || contact.createdAt || '';
+        contact.updatedAt = contact.updatedAt || '';
+        return contact;
+    }
+
+    function cardPreviewSrc(contact) {
+        return contact.cachedImageUrl || contact.frontImage || contact.originalImageUrl || contact.imageUrl || '';
+    }
+
+    function formatSavedAgo(iso) {
+        if (!iso) return '';
+        const then = new Date(iso).getTime();
+        if (!Number.isFinite(then)) return '';
+        const days = Math.round((Date.now() - then) / 86400000);
+        if (days <= 0) return 'Saved today';
+        if (days === 1) return 'Saved yesterday';
+        if (days < 21) return `Saved ${days} days ago`;
+        return `Saved ${new Date(iso).toLocaleDateString()}`;
+    }
+
     function updateContactsList(contacts) {
         if (!contactsList) return;
-        
+
         if (contacts.length === 0) {
             contactsList.innerHTML = '';
             noContacts.classList.remove('hidden');
             return;
         }
-        
+
         noContacts.classList.add('hidden');
-        contactsList.innerHTML = `
-        <div class="contact-list">
-            ${contacts.map(contact => {
-                const tags = Array.isArray(contact.tags) ? contact.tags : parseTagsInput(contact.tags);
-                const followLabel = formatFollowUpLabel(contact.followUpDate);
-                const followStatus = getFollowUpStatus(contact.followUpDate);
-                return `
-                <div class="contact-card">
-                    <div class="contact-card__inner">
-                        ${contact.cachedImageUrl
-                            ? `<img src="${contact.cachedImageUrl}" alt="${escapeHtml(contact.name || 'Contact')}" class="contact-card__avatar thumbnail-image" data-card-id="${contact.cardId}" loading="lazy">`
-                            : `<div class="contact-card__avatar" aria-hidden="true"></div>`
-                        }
-                        <div class="contact-card__body">
-                            <h3>${escapeHtml(contact.name || 'Unnamed Contact')}</h3>
-                            <p class="contact-card__meta">${escapeHtml([contact.title, contact.company].filter(Boolean).join(' · '))}</p>
-                            <div class="contact-card__details">
-                                ${contact.email ? `<span>${escapeHtml(contact.email)}</span>` : ''}
-                                ${contact.phone ? `<span>${escapeHtml(contact.phone)}</span>` : ''}
+        contactsList.innerHTML = contacts.map((raw) => {
+            const contact = normalizeSavedCard({ ...raw });
+            const preview = cardPreviewSrc(contact);
+            const role = [contact.title, contact.company].filter(Boolean).join(' · ');
+            const initial = (contact.name || contact.company || 'C').trim().charAt(0).toUpperCase();
+            return `
+                <article class="saved-card" data-card-id="${contact.cardId}" role="button" tabindex="0">
+                    <div class="saved-card__preview">
+                        ${preview
+                            ? `<img src="${preview}" alt="" loading="lazy">`
+                            : `<div class="saved-card__preview-fallback">${escapeHtml(initial)}</div>`}
+                    </div>
+                    <div class="saved-card__body">
+                        <div class="saved-card__row">
+                            <div>
+                                <h3>${escapeHtml(contact.name || 'Unnamed contact')}</h3>
+                                ${role ? `<p class="saved-card__meta">${escapeHtml(role)}</p>` : ''}
+                                <p class="saved-card__when">${escapeHtml(formatSavedAgo(contact.createdAt || contact.dateAdded))}${(contact.sides > 1 || contact.backImage) ? ' · Front & back' : ''}</p>
                             </div>
-                            ${(tags.length || followLabel || contact.sides > 1 || contact.originalBackImageUrl) ? `
-                            <div class="contact-card__extras">
-                                ${(contact.sides > 1 || contact.originalBackImageUrl) ? `<span class="tag-chip">2 sides</span>` : ''}
-                                ${followLabel ? `<span class="due-badge due-badge--${followStatus || 'upcoming'}">${escapeHtml(followLabel)}</span>` : ''}
-                                ${tags.map((tag) => `<span class="tag-chip">${escapeHtml(tag)}</span>`).join('')}
-                            </div>` : ''}
-                            <div class="contact-card__actions">
-                                <button class="download-vcard-btn chip-btn" type="button" data-card-id="${contact.cardId}" title="Download vCard" aria-label="Download vCard">Save</button>
-                                <button class="share-contact-btn chip-btn" type="button" data-card-id="${contact.cardId}">Share</button>
-                                <button class="copy-contact-btn chip-btn" type="button" data-card-id="${contact.cardId}">Copy</button>
-                                <button class="edit-contact-btn chip-btn chip-btn--accent" type="button" data-card-id="${contact.cardId}">Edit</button>
-                                <button class="delete-contact-btn chip-btn chip-btn--danger" type="button" data-card-id="${contact.cardId}">Delete</button>
-                            </div>
+                            <button type="button" class="saved-card__menu" data-edit="${contact.cardId}" aria-label="Edit card">•••</button>
                         </div>
                     </div>
-                </div>
-            `}).join('')}
-        </div>
-    `;
+                </article>
+            `;
+        }).join('');
 
-        // Attach event listeners safely (no inline JS)
-        document.querySelectorAll('.edit-contact-btn').forEach(btn => {
-            btn.addEventListener('click', () => {
-                const cardId = btn.dataset.cardId;
-                const contact = contactsData.find(c => c.cardId === cardId);
-                if (contact) {
-                    showEditContactModal(contact);
+        contactsList.querySelectorAll('.saved-card').forEach((card) => {
+            const open = () => {
+                const contact = contactsData.find((c) => c.cardId === card.dataset.cardId);
+                if (contact) openContactDetail(contact);
+            };
+            card.addEventListener('click', open);
+            card.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    open();
                 }
             });
         });
-
-        document.querySelectorAll('.delete-contact-btn').forEach(btn => {
-            btn.addEventListener('click', () => {
-                const cardId = btn.dataset.cardId;
-                if (confirm('Are you sure you want to delete this contact?')) {
-                    deleteContact(cardId);
-                }
-            });
-        });
-
-        // Add click event to thumbnail images to show original image
-        document.querySelectorAll('.thumbnail-image').forEach(img => {
-            img.addEventListener('click', () => {
-                const cardId = img.dataset.cardId;
-                const contact = contactsData.find(c => c.cardId === cardId);
-                if (contact && (contact.originalImageUrl || contact.originalBackImageUrl)) {
-                    showOriginalImage(contact);
-                }
-            });
-        });
-
-        // Attach event listeners for vCard download buttons
-        document.querySelectorAll('.download-vcard-btn').forEach(btn => {
-            btn.addEventListener('click', async () => {
-                const cardId = btn.dataset.cardId;
-                if (!cardId || !userId) {
-                    showToast('Unable to download vCard', 'error');
-                    return;
-                }
-                try {
-                    const response = await fetch(`${API_URL}/vcard/${cardId}?userId=${encodeURIComponent(userId)}`);
-                    if (!response.ok) throw new Error('Failed to download vCard');
-                    const vcardContent = await response.text();
-                    const contact = contactsData.find(c => c.cardId === cardId);
-                    const filename = `${(contact?.name || 'contact').replace(/[^\w.-]+/g, '_')}.vcf`;
-                    downloadBlob(new Blob([vcardContent], { type: 'text/vcard' }), filename);
-                    showToast('vCard downloaded', 'success');
-                } catch (err) {
-                    showToast('Failed to download vCard', 'error');
-                }
-            });
-        });
-
-        document.querySelectorAll('.share-contact-btn').forEach(btn => {
-            btn.addEventListener('click', async () => {
-                const cardId = btn.dataset.cardId;
-                const contact = contactsData.find(c => c.cardId === cardId);
-                if (!contact || !userId) {
-                    showToast('Unable to share contact', 'error');
-                    return;
-                }
-                try {
-                    let vcardContent = '';
-                    try {
-                        const response = await fetch(`${API_URL}/vcard/${cardId}?userId=${encodeURIComponent(userId)}`);
-                        if (response.ok) vcardContent = await response.text();
-                    } catch (e) { /* fall through to client vCard */ }
-                    if (!vcardContent) vcardContent = buildVCard(contact);
-                    const result = await shareVCardContent(vcardContent, contact);
-                    if (result === 'fallback') showToast('Contact copied and downloaded', 'success');
-                    else if (result !== 'aborted') showToast('Contact shared', 'success');
-                } catch (err) {
-                    showToast('Failed to share contact', 'error');
-                }
-            });
-        });
-
-        document.querySelectorAll('.copy-contact-btn').forEach(btn => {
-            btn.addEventListener('click', async () => {
-                const cardId = btn.dataset.cardId;
-                const contact = contactsData.find(c => c.cardId === cardId);
-                if (!contact) return;
-                try {
-                    await copyTextToClipboard(contactShareText(contact));
-                    showToast('Copied to clipboard', 'success');
-                } catch (err) {
-                    showToast('Clipboard blocked — select and copy manually', 'warning');
-                }
+        contactsList.querySelectorAll('.saved-card__menu').forEach((btn) => {
+            btn.addEventListener('click', (event) => {
+                event.stopPropagation();
+                const contact = contactsData.find((c) => c.cardId === btn.dataset.edit);
+                if (contact) showEditContactModal(contact);
             });
         });
     }
+
+    let pendingReviewContact = null;
+    let activeDetailContact = null;
+    let detailShowingBack = false;
+    let closingDetailFromPop = false;
+
+    function closeScanReview() {
+        const review = document.getElementById('scanReview');
+        if (!review) return;
+        review.classList.add('hidden');
+        review.setAttribute('aria-hidden', 'true');
+        document.body.classList.remove('scan-review-open');
+        pendingReviewContact = null;
+    }
+
+    function openScanReview(contact) {
+        const review = document.getElementById('scanReview');
+        if (!review || !contact) return;
+        pendingReviewContact = normalizeSavedCard(contact);
+        const front = pendingReviewContact.frontImage || pendingReviewContact.originalImageUrl || '';
+        const back = pendingReviewContact.backImage || pendingReviewContact.originalBackImageUrl || '';
+        const frontImg = document.getElementById('scanReviewFront');
+        const backImg = document.getElementById('scanReviewBack');
+        const backWrap = document.getElementById('scanReviewBackWrap');
+        if (frontImg) frontImg.src = front;
+        if (back) {
+            if (backImg) backImg.src = back;
+            backWrap?.classList.remove('hidden');
+        } else {
+            backWrap?.classList.add('hidden');
+        }
+        const status = document.getElementById('scanReviewStatus');
+        if (status) {
+            status.textContent = pendingReviewContact.name
+                ? 'Review the cropped card, then save it to your network.'
+                : 'We could not read every field. Edit the details before saving.';
+        }
+        const fields = document.getElementById('scanReviewFields');
+        if (fields) fields.innerHTML = renderDetailSections(pendingReviewContact);
+        review.classList.remove('hidden');
+        review.setAttribute('aria-hidden', 'false');
+        document.body.classList.add('scan-review-open');
+    }
+
+    document.getElementById('scanReviewClose')?.addEventListener('click', () => {
+        closeScanReview();
+        switchToTab('contacts');
+    });
+    document.getElementById('scanReviewEdit')?.addEventListener('click', () => {
+        if (pendingReviewContact) showEditContactModal(pendingReviewContact);
+    });
+    document.getElementById('scanReviewSave')?.addEventListener('click', () => {
+        closeScanReview();
+        switchToTab('contacts');
+        showToast('Card saved', 'success');
+    });
+
+    function firstPhoneNumber(phone) {
+        return String(phone || '').split('/')[0].replace(/[^\d+]/g, '') || String(phone || '').trim();
+    }
+
+    function closeContactDetail(fromPop) {
+        const view = document.getElementById('contactDetailView');
+        if (!view) return;
+        closeCardPhotoLightbox();
+        view.classList.add('hidden');
+        view.setAttribute('aria-hidden', 'true');
+        document.body.classList.remove('contact-detail-open');
+        activeDetailContact = null;
+        detailShowingBack = false;
+        document.getElementById('contactDetailFlipCard')?.classList.remove('is-flipped');
+        if (!fromPop && history.state && history.state.folioCard) {
+            closingDetailFromPop = true;
+            history.back();
+        }
+    }
+
+    function iconMarkup(name) {
+        const icons = {
+            phone: '<path d="M6 4h3l1.5 4-2 1.5a12 12 0 006 6L16.5 14l4 1.5V19a2 2 0 01-2 2A15 15 0 014 6a2 2 0 012-2z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>',
+            mail: '<path d="M4 6h16v12H4V6zm0 0l8 7 8-7" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>',
+            web: '<path d="M12 3a9 9 0 100 18 9 9 0 000-18zm0 0c2.5 2.4 4 5.6 4 9s-1.5 6.6-4 9c-2.5-2.4-4-5.6-4-9s1.5-6.6 4-9zM3 12h18" stroke="currentColor" stroke-width="1.7"/>',
+            pin: '<path d="M12 21s7-6.1 7-11a7 7 0 10-14 0c0 4.9 7 11 7 11z" stroke="currentColor" stroke-width="1.7"/><circle cx="12" cy="10" r="2.2" stroke="currentColor" stroke-width="1.7"/>',
+            note: '<path d="M7 5h10v14H7zM9 9h6M9 13h4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>',
+        };
+        return `<svg viewBox="0 0 24 24" fill="none" width="18" height="18">${icons[name] || ''}</svg>`;
+    }
+
+    async function vcardForContact(contact) {
+        try {
+            const response = await fetch(`${API_URL}/vcard/${contact.cardId}?userId=${encodeURIComponent(userId)}`, {
+                headers: authHeaders(),
+            });
+            if (response.ok) return await response.text();
+        } catch (e) { /* local */ }
+        return buildVCard(contact);
+    }
+
+    async function saveContactToDevice(contact) {
+        const vcardContent = await vcardForContact(contact);
+        const filename = `${(contact.name || 'contact').replace(/[^\w.-]+/g, '_')}.vcf`;
+        const blob = new Blob([vcardContent], { type: 'text/vcard' });
+        const file = new File([blob], filename, { type: 'text/vcard' });
+        try {
+            if (navigator.share && (!navigator.canShare || navigator.canShare({ files: [file] }))) {
+                await navigator.share({
+                    files: [file],
+                    title: contact.name || 'Contact',
+                    text: contactShareText(contact),
+                });
+                return 'shared';
+            }
+        } catch (err) {
+            if (err && err.name === 'AbortError') return 'aborted';
+        }
+        downloadBlob(blob, filename);
+        return 'downloaded';
+    }
+
+    function renderDetailSections(contact) {
+        const blocks = [];
+        const contactRows = [
+            contact.phone ? `<a class="detail-row" href="tel:${escapeHtml(firstPhoneNumber(contact.phone))}"><span>${iconMarkup('phone')}</span><strong>${escapeHtml(contact.phone)}</strong></a>` : '',
+            contact.email ? `<a class="detail-row" href="mailto:${escapeHtml(contact.email)}"><span>${iconMarkup('mail')}</span><strong>${escapeHtml(contact.email)}</strong></a>` : '',
+            contact.website ? `<a class="detail-row" href="${escapeHtml(normalizeHref(contact.website))}" target="_blank" rel="noopener"><span>${iconMarkup('web')}</span><strong>${escapeHtml(contact.website)}</strong></a>` : '',
+        ].filter(Boolean);
+        if (contactRows.length) blocks.push(`<section class="detail-block"><h4>Contact</h4>${contactRows.join('')}</section>`);
+        if (contact.address) {
+            blocks.push(`<section class="detail-block"><h4>Address</h4><a class="detail-row" href="https://maps.google.com/?q=${encodeURIComponent(contact.address)}" target="_blank" rel="noopener"><span>${iconMarkup('pin')}</span><strong>${escapeHtml(contact.address)}</strong></a></section>`);
+        }
+        const socialRows = ['linkedin', 'instagram', 'twitter', 'github']
+            .map((key) => contact[key] ? `<a class="detail-row" href="${escapeHtml(normalizeHref(contact[key]))}" target="_blank" rel="noopener"><span>${iconMarkup('web')}</span><strong>${escapeHtml(key)} · ${escapeHtml(contact[key])}</strong></a>` : '')
+            .filter(Boolean);
+        if (socialRows.length) blocks.push(`<section class="detail-block"><h4>Social</h4>${socialRows.join('')}</section>`);
+        const extra = [
+            contact.department ? `<div class="detail-row"><span></span><strong>${escapeHtml(contact.department)}</strong></div>` : '',
+            contact.industry && contact.industry !== 'Other' ? `<div class="detail-row"><span></span><strong>${escapeHtml(contact.industry)}</strong></div>` : '',
+            contact.notes ? `<div class="detail-row"><span>${iconMarkup('note')}</span><strong>${escapeHtml(contact.notes)}</strong></div>` : '',
+        ].filter(Boolean);
+        if (extra.length) blocks.push(`<section class="detail-block"><h4>More</h4>${extra.join('')}</section>`);
+        return blocks.join('');
+    }
+
+    function openContactDetail(contact) {
+        const view = document.getElementById('contactDetailView');
+        if (!view || !contact) return;
+        contact = normalizeSavedCard(contact);
+        activeDetailContact = contact;
+        detailShowingBack = false;
+        document.getElementById('contactDetailTitle').textContent = contact.name || 'Saved card';
+        const front = contact.frontImage || contact.originalImageUrl || contact.cachedImageUrl || '';
+        const back = contact.backImage || contact.originalBackImageUrl || '';
+        const photo = document.getElementById('contactDetailPhoto');
+        const photoBack = document.getElementById('contactDetailPhotoBack');
+        const flipCard = document.getElementById('contactDetailFlipCard');
+        flipCard?.classList.remove('is-flipped');
+        if (front) {
+            photo.onload = () => {
+                if (photo.naturalWidth && photo.naturalHeight) {
+                    flipCard.style.aspectRatio = `${photo.naturalWidth} / ${photo.naturalHeight}`;
+                }
+            };
+            photo.src = front;
+        }
+        else photo.removeAttribute('src');
+        if (back) photoBack.src = back;
+        else photoBack.removeAttribute('src');
+        flipCard?.classList.toggle('is-single', !back);
+        const hint = document.getElementById('contactDetailFlipHint');
+        if (hint) hint.textContent = back ? 'Front · Tap to flip · Hold to view' : 'Front · Hold to view';
+
+        const role = [contact.title, contact.company].filter(Boolean).join(' · ');
+        document.getElementById('contactDetailIdentity').innerHTML = `
+            <h3>${escapeHtml(contact.name || 'Unnamed contact')}</h3>
+            ${contact.title ? `<p>${escapeHtml(contact.title)}</p>` : ''}
+            ${contact.company ? `<p>${escapeHtml(contact.company)}</p>` : ''}
+            ${!contact.title && !contact.company && role ? `<p>${escapeHtml(role)}</p>` : ''}
+        `;
+
+        const quick = document.getElementById('contactDetailQuick');
+        quick.innerHTML = `
+            <button type="button" class="btn-luxury" id="contactDetailSave"><span>Save Contact</span></button>
+            <button type="button" class="chip-btn" id="contactDetailShare">Share Connection</button>
+            <button type="button" class="chip-btn" id="contactDetailEditBtn">Edit</button>
+        `;
+        document.getElementById('contactDetailFields').innerHTML = renderDetailSections(contact);
+
+        quick.querySelector('#contactDetailSave')?.addEventListener('click', async () => {
+            const result = await saveContactToDevice(contact);
+            if (result === 'shared') showToast('Contact opened for saving', 'success');
+            else if (result === 'downloaded') showToast('Contact file downloaded — open it to save', 'success');
+        });
+        quick.querySelector('#contactDetailShare')?.addEventListener('click', async () => {
+            const result = await shareVCardContent(await vcardForContact(contact), contact);
+            if (result === 'fallback') showToast('Connection copied and downloaded', 'success');
+            else if (result !== 'aborted') showToast('Connection shared', 'success');
+        });
+        quick.querySelector('#contactDetailEditBtn')?.addEventListener('click', () => showEditContactModal(contact));
+
+        view.classList.remove('hidden');
+        view.setAttribute('aria-hidden', 'false');
+        document.body.classList.add('contact-detail-open');
+        view.querySelector('.card-detail__scroll')?.scrollTo(0, 0);
+        if (!history.state || history.state.folioCard !== contact.cardId) {
+            history.pushState({ folioCard: contact.cardId }, '');
+        }
+    }
+
+    document.getElementById('contactDetailBack')?.addEventListener('click', () => closeContactDetail());
+    document.getElementById('contactDetailEdit')?.addEventListener('click', () => {
+        if (activeDetailContact) showEditContactModal(activeDetailContact);
+    });
+    document.getElementById('contactDetailMore')?.addEventListener('click', () => {
+        if (activeDetailContact) showEditContactModal(activeDetailContact);
+    });
+    document.getElementById('contactDetailDelete')?.addEventListener('click', async () => {
+        if (!activeDetailContact) return;
+        if (!confirm('Delete this saved card?')) return;
+        const id = activeDetailContact.cardId;
+        closeContactDetail();
+        await deleteContact(id);
+    });
+
+    const cardPhotoLightbox = document.getElementById('cardPhotoLightbox');
+    const cardPhotoLightboxImg = document.getElementById('cardPhotoLightboxImg');
+    let skipFlipAfterHold = false;
+
+    function currentDetailPhotoSrc() {
+        if (!activeDetailContact) return '';
+        if (detailShowingBack) {
+            return activeDetailContact.originalBackImageUrl
+                || activeDetailContact.backImage
+                || '';
+        }
+        return activeDetailContact.originalImageUrl
+            || activeDetailContact.frontImage
+            || activeDetailContact.cachedImageUrl
+            || '';
+    }
+
+    function openCardPhotoLightbox(src) {
+        const url = src || currentDetailPhotoSrc();
+        if (!url || !cardPhotoLightbox || !cardPhotoLightboxImg) return;
+        cardPhotoLightboxImg.src = url;
+        cardPhotoLightbox.classList.remove('hidden');
+        cardPhotoLightbox.setAttribute('aria-hidden', 'false');
+        document.body.classList.add('card-photo-open');
+    }
+
+    function closeCardPhotoLightbox() {
+        if (!cardPhotoLightbox) return;
+        cardPhotoLightbox.classList.add('hidden');
+        cardPhotoLightbox.setAttribute('aria-hidden', 'true');
+        document.body.classList.remove('card-photo-open');
+    }
+
+    document.getElementById('cardPhotoLightboxClose')?.addEventListener('click', (event) => {
+        event.stopPropagation();
+        closeCardPhotoLightbox();
+    });
+    cardPhotoLightbox?.addEventListener('click', (event) => {
+        if (event.target === cardPhotoLightbox || event.target === cardPhotoLightboxImg) {
+            closeCardPhotoLightbox();
+        }
+    });
+
+    const flipCardEl = document.getElementById('contactDetailFlipCard');
+    if (flipCardEl) {
+        let holdTimer = null;
+        let startX = 0;
+        let startY = 0;
+        const clearHold = () => {
+            if (holdTimer) {
+                window.clearTimeout(holdTimer);
+                holdTimer = null;
+            }
+        };
+        flipCardEl.addEventListener('pointerdown', (event) => {
+            if (event.pointerType === 'mouse' && event.button !== 0) return;
+            skipFlipAfterHold = false;
+            startX = event.clientX;
+            startY = event.clientY;
+            clearHold();
+            holdTimer = window.setTimeout(() => {
+                holdTimer = null;
+                skipFlipAfterHold = true;
+                try { flipCardEl.releasePointerCapture(event.pointerId); } catch (e) { /* ignore */ }
+                openCardPhotoLightbox();
+            }, 430);
+        });
+        const cancelHold = (event) => {
+            if (event && (Math.abs(event.clientX - startX) > 14 || Math.abs(event.clientY - startY) > 14)) {
+                clearHold();
+            }
+        };
+        flipCardEl.addEventListener('pointermove', cancelHold);
+        flipCardEl.addEventListener('pointerup', clearHold);
+        flipCardEl.addEventListener('pointercancel', clearHold);
+        flipCardEl.addEventListener('contextmenu', (event) => event.preventDefault());
+        flipCardEl.addEventListener('click', () => {
+            if (skipFlipAfterHold) {
+                skipFlipAfterHold = false;
+                return;
+            }
+            if (!activeDetailContact) return;
+            const back = activeDetailContact.backImage || activeDetailContact.originalBackImageUrl;
+            if (!back) {
+                openCardPhotoLightbox();
+                return;
+            }
+            detailShowingBack = !detailShowingBack;
+            flipCardEl.classList.toggle('is-flipped', detailShowingBack);
+            const hintEl = document.getElementById('contactDetailFlipHint');
+            if (hintEl) {
+                hintEl.textContent = detailShowingBack ? 'Back · Tap to flip · Hold to view' : 'Front · Tap to flip · Hold to view';
+            }
+        });
+    }
+    document.getElementById('emptyScanBtn')?.addEventListener('click', () => {
+        switchToTab('scan');
+        startLiveCamera(document.getElementById('cameraPanel'));
+    });
+    document.addEventListener('keydown', (event) => {
+        if (event.key !== 'Escape') return;
+        if (cardPhotoLightbox && !cardPhotoLightbox.classList.contains('hidden')) {
+            closeCardPhotoLightbox();
+            return;
+        }
+        if (!document.getElementById('contactDetailView')?.classList.contains('hidden')) {
+            closeContactDetail();
+        }
+    });
+    window.addEventListener('popstate', () => {
+        if (closingDetailFromPop) {
+            closingDetailFromPop = false;
+            return;
+        }
+        if (!document.getElementById('contactDetailView')?.classList.contains('hidden')) {
+            closeContactDetail(true);
+        }
+    });
 
     // Reset Uploads
     resetBtn.addEventListener('click', () => {
@@ -1040,6 +1650,7 @@ document.addEventListener('DOMContentLoaded', () => {
         uploadProgress.textContent = '';
         thumbnailGallery.innerHTML = '';
         scanCompleteMessage.classList.add('hidden');
+        setScanProcessing(false);
         setUploadShimmer(false);
         pendingFrontUpload = null;
         const mascot = document.getElementById('scanMascot');
@@ -1088,17 +1699,36 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Process Single Business Card File
-    async function compressImageFile(file, maxDim = 2000, quality = 0.85) {
+    async function compressImageFile(file, maxDim = 1400, quality = 0.72) {
         const dataUrl = await new Promise((resolve, reject) => {
             const reader = new FileReader();
             reader.onload = () => resolve(reader.result);
             reader.onerror = () => reject(new Error('Error reading file'));
             reader.readAsDataURL(file);
         });
+        if (window.FolioCrop) {
+            try {
+                const source = await FolioCrop.loadCanvas(dataUrl);
+                const cropped = FolioCrop.autoCrop(source);
+                const frame = cropped.changed ? cropped.canvas : source;
+                let { width, height } = frame;
+                const scale = Math.min(1, maxDim / Math.max(width, height));
+                width = Math.max(1, Math.round(width * scale));
+                height = Math.max(1, Math.round(height * scale));
+                const canvas = document.createElement('canvas');
+                canvas.width = width;
+                canvas.height = height;
+                canvas.getContext('2d').drawImage(frame, 0, 0, width, height);
+                return canvas.toDataURL('image/jpeg', quality);
+            } catch (err) {
+                console.warn('FolioCrop compress fallback', err);
+            }
+        }
         return new Promise((resolve) => {
             const img = new Image();
             img.onload = () => {
-                let { width, height } = img;
+                const cropped = cropToVisitingCard(img);
+                let { width, height } = cropped;
                 const scale = Math.min(1, maxDim / Math.max(width, height));
                 width = Math.max(1, Math.round(width * scale));
                 height = Math.max(1, Math.round(height * scale));
@@ -1106,7 +1736,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 canvas.width = width;
                 canvas.height = height;
                 const ctx = canvas.getContext('2d');
-                ctx.drawImage(img, 0, 0, width, height);
+                ctx.drawImage(cropped, 0, 0, width, height);
                 resolve(canvas.toDataURL('image/jpeg', quality));
             };
             img.onerror = () => resolve(dataUrl);
@@ -1114,7 +1744,292 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    function canvasFromImage(source) {
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, source.width || source.videoWidth || 1);
+        canvas.height = Math.max(1, source.height || source.videoHeight || 1);
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+        return canvas;
+    }
+
+    function centerCardBox(width, height) {
+        const target = 1.65;
+        let cropW;
+        let cropH;
+        if (width / height > target) {
+            cropH = height * 0.86;
+            cropW = cropH * target;
+        } else {
+            cropW = width * 0.9;
+            cropH = cropW / target;
+        }
+        if (cropW > width) {
+            cropW = width;
+            cropH = cropW / target;
+        }
+        if (cropH > height) {
+            cropH = height;
+            cropW = cropH * target;
+        }
+        return {
+            x: Math.max(0, (width - cropW) / 2),
+            y: Math.max(0, (height - cropH) / 2),
+            width: cropW,
+            height: cropH,
+        };
+    }
+
+    function detectCardBox(canvas) {
+        const maxSide = 360;
+        const scale = Math.min(1, maxSide / Math.max(canvas.width, canvas.height));
+        const w = Math.max(8, Math.round(canvas.width * scale));
+        const h = Math.max(8, Math.round(canvas.height * scale));
+        const probe = document.createElement('canvas');
+        probe.width = w;
+        probe.height = h;
+        const ctx = probe.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(canvas, 0, 0, w, h);
+        let data;
+        try {
+            data = ctx.getImageData(0, 0, w, h).data;
+        } catch (err) {
+            return centerCardBox(canvas.width, canvas.height);
+        }
+        const luma = new Uint8Array(w * h);
+        for (let i = 0; i < luma.length; i += 1) {
+            const j = i * 4;
+            luma[i] = (data[j] * 299 + data[j + 1] * 587 + data[j + 2] * 114) / 1000;
+        }
+        const border = [];
+        for (let x = 0; x < w; x += 1) {
+            border.push(luma[x], luma[(h - 1) * w + x]);
+        }
+        for (let y = 0; y < h; y += 1) {
+            border.push(luma[y * w], luma[y * w + w - 1]);
+        }
+        border.sort((a, b) => a - b);
+        const bg = border[Math.floor(border.length / 2)];
+        const thresh = 26;
+        let minX = w;
+        let minY = h;
+        let maxX = 0;
+        let maxY = 0;
+        let count = 0;
+        for (let y = 2; y < h - 2; y += 1) {
+            for (let x = 2; x < w - 2; x += 1) {
+                if (Math.abs(luma[y * w + x] - bg) > thresh) {
+                    count += 1;
+                    if (x < minX) minX = x;
+                    if (y < minY) minY = y;
+                    if (x > maxX) maxX = x;
+                    if (y > maxY) maxY = y;
+                }
+            }
+        }
+        const boxW = Math.max(1, maxX - minX);
+        const boxH = Math.max(1, maxY - minY);
+        const coverage = (boxW * boxH) / (w * h);
+        const aspect = canvas.width / canvas.height;
+        if (coverage < 0.14 || coverage > 0.94 || boxW < w * 0.28 || boxH < h * 0.22) {
+            if (aspect > 1.35 && aspect < 2.15) {
+                return { x: 0, y: 0, width: canvas.width, height: canvas.height };
+            }
+            return centerCardBox(canvas.width, canvas.height);
+        }
+        const padX = boxW * 0.04;
+        const padY = boxH * 0.05;
+        const x = Math.max(0, (minX - padX) / scale);
+        const y = Math.max(0, (minY - padY) / scale);
+        const width = Math.min(canvas.width - x, (boxW + padX * 2) / scale);
+        const height = Math.min(canvas.height - y, (boxH + padY * 2) / scale);
+        return { x, y, width, height };
+    }
+
+    function cropCanvas(source, box) {
+        const x = Math.max(0, Math.floor(box.x));
+        const y = Math.max(0, Math.floor(box.y));
+        const width = Math.max(1, Math.min(source.width - x, Math.round(box.width)));
+        const height = Math.max(1, Math.min(source.height - y, Math.round(box.height)));
+        const out = document.createElement('canvas');
+        out.width = width;
+        out.height = height;
+        out.getContext('2d').drawImage(source, x, y, width, height, 0, 0, width, height);
+        return out;
+    }
+
+    function cropToVisitingCard(source) {
+        if (window.FolioCrop) {
+            return FolioCrop.autoCrop(source).canvas;
+        }
+        const canvas = source.tagName === 'CANVAS' ? source : canvasFromImage(source);
+        if (canvas.width < 12 || canvas.height < 12) return canvas;
+        return cropCanvas(canvas, detectCardBox(canvas));
+    }
+
+    async function cropAndConfirm(file, sideLabel) {
+        if (!window.FolioCrop) return file;
+        const url = URL.createObjectURL(file);
+        try {
+            const canvas = await FolioCrop.loadCanvas(url);
+            const cropped = FolioCrop.autoCrop(canvas);
+            if (!cropped.changed) return file;
+            return FolioCrop.toFile(cropped.canvas, `folio-${sideLabel || 'card'}-${Date.now()}.jpg`);
+        } catch (err) {
+            console.warn('Silent card crop fallback', err);
+            return file;
+        } finally {
+            URL.revokeObjectURL(url);
+        }
+    }
+
+    async function recropStoredContact(contact) {
+        if (!window.FolioCrop || !contact) return;
+        const src = contact.originalImageUrl || contact.frontImage || contact.imageUrl || contact.cachedImageUrl;
+        if (!src || !(src.startsWith('data:') || src.startsWith('blob:') || src.startsWith('http'))) return;
+        try {
+            const canvas = await FolioCrop.loadCanvas(src);
+            if (!FolioCrop.needsRecrop(canvas)) {
+                contact.frontImage = contact.frontImage || src;
+                contact.originalImageUrl = contact.originalImageUrl || src;
+                return;
+            }
+            const cropped = FolioCrop.autoCrop(canvas);
+            contact.originalImageUrl = cropped.dataUrl;
+            contact.frontImage = cropped.dataUrl;
+            contact.cachedImageUrl = cropped.dataUrl;
+            contact.imageUrl = cropped.dataUrl;
+            try { localStorage.removeItem(`thumbnail_${contact.cardId}`); } catch (e) { /* ignore */ }
+            try { localStorage.removeItem(`thumbnail_v2_${contact.cardId}`); } catch (e) { /* ignore */ }
+            const backSrc = contact.originalBackImageUrl || contact.backImage;
+            if (backSrc && (backSrc.startsWith('data:') || backSrc.startsWith('http'))) {
+                const backCanvas = await FolioCrop.loadCanvas(backSrc);
+                if (FolioCrop.needsRecrop(backCanvas)) {
+                    const backCropped = FolioCrop.autoCrop(backCanvas);
+                    contact.originalBackImageUrl = backCropped.dataUrl;
+                    contact.backImage = backCropped.dataUrl;
+                }
+            }
+        } catch (err) {
+            console.warn('Could not recrop stored card', err);
+        }
+    }
+
+    function mapOverlayToSourceBox(videoEl, overlayEl, sourceW, sourceH) {
+        if (!videoEl || !overlayEl || !sourceW || !sourceH) return null;
+        const videoRect = videoEl.getBoundingClientRect();
+        const overlayRect = overlayEl.getBoundingClientRect();
+        if (!videoRect.width || !overlayRect.width) return null;
+        const videoAspect = sourceW / sourceH;
+        const elAspect = videoRect.width / videoRect.height;
+        let drawW;
+        let drawH;
+        let offX = 0;
+        let offY = 0;
+        if (videoAspect > elAspect) {
+            drawH = videoRect.height;
+            drawW = drawH * videoAspect;
+            offX = (videoRect.width - drawW) / 2;
+        } else {
+            drawW = videoRect.width;
+            drawH = drawW / videoAspect;
+            offY = (videoRect.height - drawH) / 2;
+        }
+        const x = ((overlayRect.left - videoRect.left - offX) / drawW) * sourceW;
+        const y = ((overlayRect.top - videoRect.top - offY) / drawH) * sourceH;
+        const width = (overlayRect.width / drawW) * sourceW;
+        const height = (overlayRect.height / drawH) * sourceH;
+        const clampedX = Math.max(0, x);
+        const clampedY = Math.max(0, y);
+        return {
+            x: clampedX,
+            y: clampedY,
+            width: Math.max(1, Math.min(sourceW - clampedX, width - (clampedX - x))),
+            height: Math.max(1, Math.min(sourceH - clampedY, height - (clampedY - y))),
+        };
+    }
+
+    function cropCanvasToGuide(sourceCanvas, videoEl, guideEl) {
+        const box = mapOverlayToSourceBox(videoEl, guideEl, sourceCanvas.width, sourceCanvas.height);
+        if (!box) return sourceCanvas;
+        const inset = Math.min(box.width, box.height) * 0.012;
+        box.x += inset;
+        box.y += inset;
+        box.width -= inset * 2;
+        box.height -= inset * 2;
+        if (box.width < 12 || box.height < 12) return sourceCanvas;
+        return cropCanvas(sourceCanvas, box);
+    }
+
     let ocrWorkerPromise = null;
+
+    function tidyAddress(value) {
+        let address = String(value || '').replace(/\s+/g, ' ').trim();
+        if (!address) return '';
+        address = address.replace(/\bChanna\b/gi, 'Chennai');
+        address = address.replace(/\bChenai\b/gi, 'Chennai');
+        address = address.replace(/\bChennat\b/gi, 'Chennai');
+        if (/\b600\s?\d{3}\b/.test(address)) {
+            address = address.replace(/\bChann[aei]+\b/gi, 'Chennai');
+        }
+        return address.replace(/[,\s]+$/g, '');
+    }
+
+    function repairPhoneDigits(digits) {
+        let value = String(digits || '');
+        if (value.length === 12 && value.startsWith('01') && /[6-9]/.test(value[2])) {
+            value = `91${value.slice(2)}`;
+        }
+        if (value.length === 11 && value.startsWith('0') && /[6-9]/.test(value[1])) {
+            value = value.slice(1);
+        }
+        if (value.length === 13 && value.startsWith('910') && /[6-9]/.test(value[3])) {
+            value = `91${value.slice(3)}`;
+        }
+        return value;
+    }
+
+    function formatPhoneDigits(digits) {
+        const value = repairPhoneDigits(digits);
+        if (value.length === 12 && value.startsWith('91')) {
+            return `+91 ${value.slice(2, 7)} ${value.slice(7)}`;
+        }
+        if (value.length === 10 && /[6-9]/.test(value[0])) {
+            return `+91 ${value.slice(0, 5)} ${value.slice(5)}`;
+        }
+        if (value.length >= 8) return `+${value}`;
+        return '';
+    }
+
+    function extractPhones(text) {
+        const matches = String(text || '').match(/(?:\+|00)?\d[\d \t().\-/]{6,}\d/g) || [];
+        const phones = [];
+        const seen = new Set();
+        matches.forEach((match) => {
+            const digits = repairPhoneDigits(match.replace(/\D/g, ''));
+            if (digits.length < 8 || digits.length > 15 || seen.has(digits)) return;
+            const formatted = formatPhoneDigits(digits);
+            if (!formatted) return;
+            seen.add(digits);
+            phones.push(formatted);
+        });
+        return phones.slice(0, 3);
+    }
+
+    function extractAddress(lines) {
+        const hint = /\b(rd|road|st|street|ave|avenue|lane|nagar|layout|main|cross|block|floor|po box|city|near|opp|pin|plot|no\.?|chennai|mumbai|delhi|bengaluru|hyderabad|kolkata|pune)\b/i;
+        const pin = /\b\d{3}\s?\d{3}\b/;
+        const start = lines.findIndex((line) => hint.test(line) || pin.test(line) || /\d+[/,]\d+[A-Za-z]?/.test(line));
+        if (start < 0) return '';
+        const chunk = [];
+        for (let i = start; i < Math.min(lines.length, start + 4); i += 1) {
+            const line = lines[i];
+            if (!line || line.includes('@')) continue;
+            chunk.push(line);
+            if (i > start && pin.test(line)) break;
+        }
+        return tidyAddress(chunk.join(', '));
+    }
 
     function parseCardTextLocally(rawText) {
         const text = (rawText || '').trim();
@@ -1131,17 +2046,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const urls = text.match(/https?:\/\/[^\s]+|www\.[^\s]+/gi) || [];
         const website = urls.find((url) => !url.includes('@'));
         if (website) data.website = website.replace(/[.,;)]+$/, '');
-        const phoneMatches = text.match(/(?:\+|00)?\d[\d \t().\-/]{6,}\d/g) || [];
-        const phones = [];
-        const seenDigits = new Set();
-        phoneMatches.forEach((match) => {
-            const cleaned = match.replace(/\s+/g, ' ').trim();
-            const digits = cleaned.replace(/\D/g, '');
-            if (digits.length < 8 || digits.length > 15 || seenDigits.has(digits)) return;
-            seenDigits.add(digits);
-            phones.push(cleaned);
-        });
-        if (phones.length) data.phone = phones.slice(0, 3).join(' / ');
+        const phones = extractPhones(text);
+        if (phones.length) data.phone = phones.join(' / ');
         const skip = new Set([
             data.email.toLowerCase(),
             data.website.toLowerCase(),
@@ -1150,17 +2056,47 @@ document.addEventListener('DOMContentLoaded', () => {
             ...phones.map((phone) => phone.toLowerCase()),
             ...phones.map((phone) => phone.replace(/\s/g, '')),
         ]);
-        const leftover = text.split(/\n/).map((line) => line.trim()).filter((line) => (
+        const leftover = text.split(/\n/).map((line) => line.replace(/\s+/g, ' ').trim()).filter((line) => (
             line
             && !skip.has(line.toLowerCase())
             && !line.includes('@')
             && !/https?:\/\/|www\./i.test(line)
+            && !/(?:\+|00)?\d[\d \t().\-/]{6,}\d/.test(line)
             && (line.match(/[A-Za-z]/g) || []).length >= 2
         ));
+        const companyHint = /\b(inc|ltd|llc|pvt|gmbh|corp|co|company|group|studio|labs?|technologies|solutions|systems|enterprises|industries|traders|associates|facade)\b/i;
         if (leftover[0]) data.name = leftover[0].slice(0, 80);
-        if (leftover[1]) data.company = leftover[1].slice(0, 80);
-        if (leftover[2]) data.title = leftover[2].slice(0, 80);
+        const companyLine = leftover.find((line) => companyHint.test(line));
+        if (companyLine) {
+            data.company = companyLine.slice(0, 80);
+            if (data.name === data.company && leftover[1]) data.name = leftover[1].slice(0, 80);
+        } else if (leftover[1]) {
+            data.company = leftover[1].slice(0, 80);
+        }
+        const titleLine = leftover.find((line) => line !== data.name && line !== data.company);
+        if (titleLine) data.title = titleLine.slice(0, 80);
+        data.address = extractAddress(leftover);
         return data;
+    }
+
+    function repairContactFromOcr(contact, rawText) {
+        if (!contact) return contact;
+        const parsed = parseCardTextLocally(rawText);
+        const apiHasBadCode = /\+01\b/.test(contact.phone || '') || /(?:^|[^\d])01\s*\d{5}/.test(contact.phone || '');
+        if (parsed.phone && (apiHasBadCode || !contact.phone)) {
+            contact.phone = parsed.phone;
+        } else if (contact.phone) {
+            const repaired = extractPhones(contact.phone);
+            if (repaired.length) contact.phone = repaired.join(' / ');
+        }
+        if (parsed.address && (!contact.address || parsed.address.length > String(contact.address).length + 3)) {
+            contact.address = parsed.address;
+        } else if (contact.address) {
+            contact.address = tidyAddress(contact.address);
+        }
+        if (!contact.company && parsed.company) contact.company = parsed.company;
+        if (!contact.email && parsed.email) contact.email = parsed.email;
+        return contact;
     }
 
     function contactLooksEmpty(contact) {
@@ -1178,7 +2114,22 @@ document.addEventListener('DOMContentLoaded', () => {
         const alnum = (value.match(/[A-Za-z0-9]/g) || []).length;
         if (alnum < 6) return 0;
         const words = value.split(/\s+/).filter(Boolean).length;
-        return emails * 10 + phones * 6 + urls * 4 + Math.min(words, 50) * 0.35;
+        const pin = (value.match(/\b\d{3}\s?\d{3}\b/g) || []).length;
+        const india = /\+91|\b91\s?\d{10}\b/.test(value) ? 4 : 0;
+        return emails * 10 + phones * 6 + urls * 4 + pin * 2 + india + Math.min(words, 50) * 0.35;
+    }
+
+    function enhanceOcrPixels(ctx, width, height, invert) {
+        const imageData = ctx.getImageData(0, 0, width, height);
+        const pixels = imageData.data;
+        for (let i = 0; i < pixels.length; i += 4) {
+            let value = (pixels[i] * 299 + pixels[i + 1] * 587 + pixels[i + 2] * 114) / 1000;
+            if (invert) value = 255 - value;
+            value = (value - 128) * 1.5 + 128;
+            value = value < 112 ? Math.max(0, value - 22) : Math.min(255, value + 20);
+            pixels[i] = pixels[i + 1] = pixels[i + 2] = value;
+        }
+        ctx.putImageData(imageData, 0, 0);
     }
 
     async function prepareImageForOcr(dataUrl) {
@@ -1188,38 +2139,60 @@ document.addEventListener('DOMContentLoaded', () => {
                 let width = img.width;
                 let height = img.height;
                 const minSide = Math.min(width, height);
-                const scale = minSide < 1000 ? 1000 / minSide : (Math.max(width, height) > 2200 ? 2200 / Math.max(width, height) : 1);
+                const scale = minSide < 1400 ? 1400 / minSide : (Math.max(width, height) > 2400 ? 2400 / Math.max(width, height) : 1);
                 width = Math.max(1, Math.round(width * scale));
                 height = Math.max(1, Math.round(height * scale));
-                const canvas = document.createElement('canvas');
-                canvas.width = width;
-                canvas.height = height;
-                const ctx = canvas.getContext('2d');
-                ctx.filter = 'grayscale(1) contrast(1.4) brightness(1.06)';
-                ctx.drawImage(img, 0, 0, width, height);
-                ctx.filter = 'none';
+                let mean = 160;
                 try {
-                    const imageData = ctx.getImageData(0, 0, width, height);
-                    const pixels = imageData.data;
-                    for (let i = 0; i < pixels.length; i += 4) {
-                        const v = pixels[i];
-                        const boosted = v < 118 ? Math.max(0, v - 24) : Math.min(255, v + 22);
-                        pixels[i] = pixels[i + 1] = pixels[i + 2] = boosted;
+                    const probe = document.createElement('canvas');
+                    probe.width = 72;
+                    probe.height = 48;
+                    const probeCtx = probe.getContext('2d', { willReadFrequently: true });
+                    probeCtx.drawImage(img, 0, 0, 72, 48);
+                    const sample = probeCtx.getImageData(0, 0, 72, 48).data;
+                    let sum = 0;
+                    let count = 0;
+                    for (let i = 0; i < sample.length; i += 4) {
+                        sum += (sample[i] * 299 + sample[i + 1] * 587 + sample[i + 2] * 114) / 1000;
+                        count += 1;
                     }
-                    ctx.putImageData(imageData, 0, 0);
+                    mean = sum / Math.max(1, count);
                 } catch (err) {
-                    console.warn('OCR preprocess fallback:', err);
+                    console.warn('OCR brightness probe failed', err);
                 }
-                resolve(canvas.toDataURL('image/jpeg', 0.92));
+                const dark = mean < 140;
+                const render = (invert) => {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = width;
+                    canvas.height = height;
+                    const ctx = canvas.getContext('2d');
+                    ctx.filter = 'grayscale(1)';
+                    ctx.drawImage(img, 0, 0, width, height);
+                    ctx.filter = 'none';
+                    try {
+                        enhanceOcrPixels(ctx, width, height, invert);
+                    } catch (err) {
+                        console.warn('OCR preprocess fallback:', err);
+                    }
+                    return canvas.toDataURL('image/jpeg', 0.95);
+                };
+                resolve({
+                    primary: render(dark),
+                    alternate: render(!dark),
+                    dark,
+                });
             };
-            img.onerror = () => resolve(dataUrl);
+            img.onerror = () => resolve({ primary: dataUrl, alternate: dataUrl, dark: false });
             img.src = dataUrl;
         });
     }
 
     async function ocrImageFile(source) {
         if (typeof Tesseract === 'undefined') return '';
-        const recognizeOnce = async (psm) => {
+        const sources = source && typeof source === 'object'
+            ? [source.primary, source.alternate].filter(Boolean)
+            : [source];
+        const recognizeOnce = async (image, psm) => {
             if (Tesseract.createWorker) {
                 if (!ocrWorkerPromise) {
                     ocrWorkerPromise = Tesseract.createWorker('eng');
@@ -1229,26 +2202,39 @@ document.addEventListener('DOMContentLoaded', () => {
                     new Promise((_, reject) => setTimeout(() => reject(new Error('OCR worker timeout')), 35000)),
                 ]);
                 if (worker.setParameters) {
-                    await worker.setParameters({ tessedit_pageseg_mode: String(psm) });
+                    await worker.setParameters({
+                        tessedit_pageseg_mode: String(psm),
+                        preserve_interword_spaces: '1',
+                    });
                 }
                 const result = await Promise.race([
-                    worker.recognize(source),
+                    worker.recognize(image),
                     new Promise((_, reject) => setTimeout(() => reject(new Error('OCR timeout')), 20000)),
                 ]);
                 return (result?.data?.text || '').trim();
             }
             if (!Tesseract.recognize) return '';
             const result = await Promise.race([
-                Tesseract.recognize(source, 'eng', { tessedit_pageseg_mode: String(psm), logger: () => {} }),
+                Tesseract.recognize(image, 'eng', { tessedit_pageseg_mode: String(psm), logger: () => {} }),
                 new Promise((resolve) => setTimeout(() => resolve(null), 20000)),
             ]);
             return (result?.data?.text || '').trim();
         };
         try {
-            const first = await recognizeOnce(6);
-            if (scoreOcrText(first) >= 8) return first;
-            const second = await recognizeOnce(4);
-            return scoreOcrText(second) > scoreOcrText(first) ? second : first;
+            let best = '';
+            let bestScore = -1;
+            for (const image of sources) {
+                for (const psm of [6, 4]) {
+                    const text = await recognizeOnce(image, psm);
+                    const score = scoreOcrText(text);
+                    if (score > bestScore) {
+                        best = text;
+                        bestScore = score;
+                    }
+                    if (bestScore >= 14) return best;
+                }
+            }
+            return best;
         } catch (err) {
             console.warn('Client OCR failed:', err);
             ocrWorkerPromise = null;
@@ -1260,6 +2246,66 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!newContacts?.length) return;
         contactsData = [...contactsData, ...newContacts];
         return cacheContactsSnapshot(contactsData);
+    }
+
+    function syncedImageUrl(cardId, side = 'front') {
+        if (!cardId) return '';
+        const sideQuery = side === 'back' ? '&side=back' : '';
+        return `${API_URL}/images/${cardId}?userId=${encodeURIComponent(userId || '')}${sideQuery}`;
+    }
+
+    function applySyncedImagePointers(contact) {
+        if (!contact?.cardId) return contact;
+        const hasFront = contact.hasImage
+            || (contact.imageUrl && !String(contact.imageUrl).startsWith('data:'))
+            || contact.originalImageUrl
+            || contact.frontImage;
+        const hasBack = contact.hasBackImage
+            || (contact.backImageUrl && !String(contact.backImageUrl).startsWith('data:'))
+            || contact.originalBackImageUrl
+            || contact.backImage;
+        if (hasFront) {
+            contact.imageUrl = contact.imageUrl && String(contact.imageUrl).startsWith('db:')
+                ? contact.imageUrl
+                : (contact.imageUrl || 'db:front');
+            // Keep local data URL for immediate display if present; otherwise use API pointer.
+            if (!contact.originalImageUrl || !String(contact.originalImageUrl).startsWith('data:')) {
+                contact.originalImageUrl = syncedImageUrl(contact.cardId, 'front');
+            }
+            if (!contact.frontImage || !String(contact.frontImage).startsWith('data:')) {
+                contact.frontImage = contact.originalImageUrl;
+            }
+        }
+        if (hasBack) {
+            contact.backImageUrl = contact.backImageUrl && String(contact.backImageUrl).startsWith('db:')
+                ? contact.backImageUrl
+                : (contact.backImageUrl || 'db:back');
+            if (!contact.originalBackImageUrl || !String(contact.originalBackImageUrl).startsWith('data:')) {
+                contact.originalBackImageUrl = syncedImageUrl(contact.cardId, 'back');
+            }
+            if (!contact.backImage || !String(contact.backImage).startsWith('data:')) {
+                contact.backImage = contact.originalBackImageUrl;
+            }
+        }
+        return contact;
+    }
+
+    async function fetchContactImageDataUrl(cardId, side = 'front') {
+        const url = syncedImageUrl(cardId, side);
+        const response = await fetch(url, {
+            headers: authHeaders(),
+            credentials: 'include',
+        });
+        if (!response.ok) {
+            throw new Error(`Image ${response.status}`);
+        }
+        const blob = await response.blob();
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+        });
     }
 
     function mergeContactFields(base, extra) {
@@ -1284,44 +2330,69 @@ document.addEventListener('DOMContentLoaded', () => {
             if (file.size > 12 * 1024 * 1024) {
                 throw new Error('File too large. Maximum size is 12MB.');
             }
+            const preparing = sides.length > 1
+                ? `Preparing ${i === 0 ? 'front' : 'back'}…`
+                : 'Preparing card…';
+            if (processingStatus) processingStatus.textContent = preparing;
+            setScanProcessing(true, 'Reading your card', 'Using AI vision');
             const imageDataUrl = await compressImageFile(file);
-            const ocrSource = await prepareImageForOcr(imageDataUrl);
-            if (processingStatus) {
-                processingStatus.textContent = sides.length > 1
-                    ? `Reading ${i === 0 ? 'front' : 'back'} of card…`
-                    : 'Reading card text…';
-            }
-            const rawText = await ocrImageFile(ocrSource);
             payloads.push({
                 imageDataUrl,
                 imageBase64: imageDataUrl.split(',')[1],
-                rawText,
+                rawText: '',
             });
         }
 
-        const combinedText = payloads.map((payload, index) => {
-            const label = payloads.length > 1 ? (index === 0 ? 'FRONT' : 'BACK') : '';
-            return label ? `${label}\n${payload.rawText}` : payload.rawText;
-        }).join('\n\n');
-
-        if (processingStatus) processingStatus.textContent = 'Saving contact…';
-
-        const localContact = {
-            ...parseCardTextLocally(combinedText),
-            userId,
-            cardId: (crypto.randomUUID && crypto.randomUUID()) || `local-${Date.now()}`,
-            dateAdded: new Date().toISOString(),
-            originalImageUrl: payloads[0].imageDataUrl,
-            originalBackImageUrl: payloads[1]?.imageDataUrl || '',
-            sides: payloads.length,
+        const withImages = (contact) => {
+            if (!contact) return contact;
+            // Local preview for this device right after scan…
+            contact.originalImageUrl = payloads[0].imageDataUrl;
+            contact.frontImage = payloads[0].imageDataUrl;
+            contact.cachedImageUrl = payloads[0].imageDataUrl;
+            contact.imageUrl = contact.imageUrl || 'db:front';
+            contact.originalBackImageUrl = payloads[1]?.imageDataUrl || contact.originalBackImageUrl || '';
+            contact.backImage = payloads[1]?.imageDataUrl || contact.backImage || '';
+            if (payloads[1]) contact.backImageUrl = contact.backImageUrl || 'db:back';
+            contact.hasImage = true;
+            contact.hasBackImage = Boolean(payloads[1]);
+            contact.sides = payloads.length;
+            contact.jobTitle = contact.jobTitle || contact.title || '';
+            contact.syncStatus = 'synced';
+            return applySyncedImagePointers(contact);
         };
+
+        const runDeviceOcr = async () => {
+            setScanProcessing(true, 'Reading your card', 'Trying a second pass on this device');
+            for (let i = 0; i < payloads.length; i += 1) {
+                const reading = payloads.length > 1
+                    ? `Reading ${i === 0 ? 'front' : 'back'} of card…`
+                    : 'Reading card text…';
+                if (processingStatus) processingStatus.textContent = reading;
+                const ocrSource = await prepareImageForOcr(payloads[i].imageDataUrl);
+                payloads[i].rawText = await ocrImageFile(ocrSource);
+            }
+            const combinedText = payloads.map((payload, index) => {
+                const label = payloads.length > 1 ? (index === 0 ? 'FRONT' : 'BACK') : '';
+                return label ? `${label}\n${payload.rawText}` : payload.rawText;
+            }).join('\n\n');
+            const localContact = withImages({
+                ...parseCardTextLocally(combinedText),
+                userId,
+                cardId: (crypto.randomUUID && crypto.randomUUID()) || `local-${Date.now()}`,
+                dateAdded: new Date().toISOString(),
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+            });
+            return repairContactFromOcr(localContact, combinedText);
+        };
+
+        if (processingStatus) processingStatus.textContent = 'Reading with AI vision…';
+        setScanProcessing(true, 'Reading your card', 'Using AI vision');
 
         try {
             const response = await fetch(`${API_URL}/scan`, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
+                headers: authHeaders(),
                 body: JSON.stringify({
                     images: payloads.map((payload) => payload.imageBase64),
                     rawTexts: payloads.map((payload) => payload.rawText),
@@ -1336,31 +2407,52 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const result = await response.json();
             let newContacts = result?.contacts || [];
-            if (!newContacts.length) newContacts = [localContact];
-            newContacts = newContacts.map((contact, index) => {
-                const fillFromLocal = contactLooksEmpty(contact)
-                    ? localContact
-                    : { ...localContact, notes: contact.notes || localContact.notes || '' };
-                const merged = contactLooksEmpty(contact)
-                    ? mergeContactFields(localContact, contact)
-                    : mergeContactFields(contact, fillFromLocal);
-                if (!contactLooksEmpty(contact)) merged.notes = contact.notes || '';
-                if (index === 0) {
-                    merged.originalImageUrl = localContact.originalImageUrl;
-                    if (localContact.originalBackImageUrl) {
-                        merged.originalBackImageUrl = localContact.originalBackImageUrl;
-                    }
-                    merged.sides = localContact.sides;
-                }
-                return merged;
+            if (newContacts.length && !contactLooksEmpty(newContacts[0])) {
+                newContacts = newContacts.map((contact, index) => withImages(index === 0 ? contact : contact));
+                await rememberContacts(newContacts);
+                return { contacts: newContacts };
+            }
+        } catch (err) {
+            console.warn('AI vision scan failed, falling back to on-device OCR:', err);
+        }
+
+        const localContact = await runDeviceOcr();
+        if (processingStatus) processingStatus.textContent = 'Saving contact…';
+        setScanProcessing(true, 'Saving your card', 'Almost done');
+        try {
+            const response = await fetch(`${API_URL}/scan`, {
+                method: 'POST',
+                headers: authHeaders(),
+                body: JSON.stringify({
+                    images: payloads.map((payload) => payload.imageBase64),
+                    rawTexts: payloads.map((payload) => payload.rawText),
+                    twoSided: payloads.length > 1,
+                    userId: userId
+                })
             });
-            await rememberContacts(newContacts);
-            return { contacts: newContacts };
+            if (response.ok) {
+                const result = await response.json();
+                let newContacts = result?.contacts || [];
+                if (newContacts.length) {
+                    newContacts = newContacts.map((contact, index) => {
+                        const merged = contactLooksEmpty(contact)
+                            ? mergeContactFields(localContact, contact)
+                            : mergeContactFields(contact, localContact);
+                        return withImages(index === 0 ? repairContactFromOcr(merged, payloads.map((p) => p.rawText).join('\n\n')) : merged);
+                    });
+                    await rememberContacts(newContacts);
+                    return { contacts: newContacts };
+                }
+            }
         } catch (err) {
             console.warn('Scan API failed, saving locally from OCR:', err);
-            await rememberContacts([localContact]);
-            return { contacts: [localContact] };
         }
+        localContact.syncStatus = 'local-only';
+        await rememberContacts([localContact]);
+        if (typeof showToast === 'function') {
+            showToast('Saved on this device only — cloud sync failed. Check your connection and try again.', 'warning');
+        }
+        return { contacts: [localContact] };
     }
 
     async function processBusinessCardFile(file) {
@@ -1446,7 +2538,9 @@ document.addEventListener('DOMContentLoaded', () => {
         isLoadingContacts = true;
 
         try {
-            const response = await fetch(`${API_URL}/contacts?userId=${encodeURIComponent(userId)}`);
+            const response = await fetch(`${API_URL}/contacts?userId=${encodeURIComponent(userId)}`, {
+                headers: authHeaders(),
+            });
             if (!response.ok) {
                 throw new Error('Failed to load contacts');
             }
@@ -1465,12 +2559,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
             contactsData = contactsData.filter((c) => c && c.cardId !== '__PROFILE__' && c.kind !== 'profile' && c.kind !== 'slug-alias');
-            if (!contactsData.length) {
-                const cached = await loadCachedContactsSnapshot();
-                if (cached && cached.length) {
-                    contactsData = cached.filter((c) => c && c.cardId !== '__PROFILE__' && c.kind !== 'profile' && c.kind !== 'slug-alias');
-                }
-            }
+            // Server is source of truth when online — do not overwrite an empty account
+            // with another device's/browser's IndexedDB cache.
 
             await cacheContactsSnapshot(contactsData);
             updateTagFilterOptions();
@@ -1478,72 +2568,70 @@ document.addEventListener('DOMContentLoaded', () => {
             
             // Cache image URLs and create thumbnails for all contacts
             for (const contact of contactsData) {
-                if (contact.imageUrl) {
-                    try {
-                        if (contact.imageUrl.startsWith('data:') || contact.imageUrl.startsWith('http')) {
-                            contact.originalImageUrl = contact.imageUrl;
-                        } else {
-                            contact.originalImageUrl = `${API_URL}/images/${contact.cardId}?userId=${encodeURIComponent(userId)}`;
+                normalizeSavedCard(contact);
+                applySyncedImagePointers(contact);
+                try {
+                    const needsFrontFetch = contact.hasImage
+                        || (contact.imageUrl && String(contact.imageUrl).startsWith('db:'))
+                        || (contact.originalImageUrl && String(contact.originalImageUrl).includes('/images/'));
+                    const needsBackFetch = contact.hasBackImage
+                        || (contact.backImageUrl && String(contact.backImageUrl).startsWith('db:'))
+                        || (contact.originalBackImageUrl && String(contact.originalBackImageUrl).includes('/images/'));
+
+                    if (needsFrontFetch && (!contact.originalImageUrl || !String(contact.originalImageUrl).startsWith('data:'))) {
+                        contact.originalImageUrl = syncedImageUrl(contact.cardId, 'front');
+                    }
+                    if (needsBackFetch && (!contact.originalBackImageUrl || !String(contact.originalBackImageUrl).startsWith('data:'))) {
+                        contact.originalBackImageUrl = syncedImageUrl(contact.cardId, 'back');
+                    }
+
+                    const cachedThumbnail = localStorage.getItem(`thumbnail_v2_${contact.cardId}`);
+                    if (cachedThumbnail) {
+                        contact.cachedImageUrl = cachedThumbnail;
+                    } else if (contact.originalImageUrl && contact.originalImageUrl.startsWith('data:')) {
+                        const thumbnailDataUrl = await createThumbnail(contact.originalImageUrl, 720, 420, 0.82);
+                        try {
+                            localStorage.setItem(`thumbnail_v2_${contact.cardId}`, thumbnailDataUrl);
+                        } catch (e) {
+                            console.warn('Could not cache thumbnail in localStorage:', e);
                         }
-                        if (contact.backImageUrl) {
-                            if (contact.backImageUrl.startsWith('data:') || contact.backImageUrl.startsWith('http')) {
-                                contact.originalBackImageUrl = contact.backImageUrl;
-                            } else {
-                                contact.originalBackImageUrl = `${API_URL}/images/${contact.cardId}?userId=${encodeURIComponent(userId)}&side=back`;
-                            }
-                        }
-                        
-                        // Check if we already have a cached thumbnail in localStorage
-                        const cachedThumbnail = localStorage.getItem(`thumbnail_${contact.cardId}`);
-                        
-                        if (cachedThumbnail) {
-                            contact.cachedImageUrl = cachedThumbnail;
-            } else if (contact.originalImageUrl && contact.originalImageUrl.startsWith('data:')) {
-                            const thumbnailDataUrl = await createThumbnail(contact.originalImageUrl, 100, 100, 0.5);
+                        contact.cachedImageUrl = thumbnailDataUrl;
+                    } else if (needsFrontFetch) {
+                        try {
+                            const imageDataUrl = await fetchContactImageDataUrl(contact.cardId, 'front');
+                            contact.originalImageUrl = imageDataUrl;
+                            contact.frontImage = imageDataUrl;
+                            await recropStoredContact(contact);
+                            const thumbnailDataUrl = await createThumbnail(contact.originalImageUrl, 720, 420, 0.82);
                             try {
-                                localStorage.setItem(`thumbnail_${contact.cardId}`, thumbnailDataUrl);
+                                localStorage.setItem(`thumbnail_v2_${contact.cardId}`, thumbnailDataUrl);
                             } catch (e) {
                                 console.warn('Could not cache thumbnail in localStorage:', e);
                             }
                             contact.cachedImageUrl = thumbnailDataUrl;
-            } else {
-                            // Fetch the image and create a thumbnail
-                            const imgResponse = await fetch(contact.originalImageUrl);
-                            if (imgResponse.ok) {
-                                const blob = await imgResponse.blob();
-                                const reader = new FileReader();
-                                
-                                // Convert blob to data URL
-                                const imageDataUrl = await new Promise((resolve, reject) => {
-                                    reader.onloadend = () => resolve(reader.result);
-                                    reader.onerror = reject;
-                                    reader.readAsDataURL(blob);
-                                });
-                                
-                                // Create thumbnail
-                                const thumbnailDataUrl = await createThumbnail(imageDataUrl, 100, 100, 0.5);
-                                
-                                // Cache the thumbnail in localStorage
-                                try {
-                                    localStorage.setItem(`thumbnail_${contact.cardId}`, thumbnailDataUrl);
-                                } catch (e) {
-                                    // Handle localStorage quota exceeded
-                                    console.warn('Could not cache thumbnail in localStorage:', e);
-                                }
-                                
-                                contact.cachedImageUrl = thumbnailDataUrl;
-                            } else {
-                                // Fallback to original URL if fetch fails
-                                contact.cachedImageUrl = contact.originalImageUrl;
-                            }
+                        } catch (imgErr) {
+                            console.warn(`Could not fetch synced image for ${contact.cardId}:`, imgErr);
+                            contact.cachedImageUrl = contact.originalImageUrl || '';
                         }
-                    } catch (error) {
-                        console.warn(`Error creating thumbnail for contact ${contact.cardId}:`, error);
-                        // Fallback to original URL
-                        contact.cachedImageUrl = contact.originalImageUrl;
                     }
+
+                    if (needsBackFetch && (!contact.originalBackImageUrl || String(contact.originalBackImageUrl).includes('/images/'))) {
+                        try {
+                            contact.originalBackImageUrl = await fetchContactImageDataUrl(contact.cardId, 'back');
+                            contact.backImage = contact.originalBackImageUrl;
+                        } catch (backErr) {
+                            console.warn(`Could not fetch back image for ${contact.cardId}:`, backErr);
+                        }
+                    }
+
+                    await recropStoredContact(contact);
+                    normalizeSavedCard(contact);
+                } catch (error) {
+                    console.warn(`Error creating thumbnail for contact ${contact.cardId}:`, error);
+                    contact.cachedImageUrl = contact.originalImageUrl || contact.frontImage;
                 }
             }
+            await cacheContactsSnapshot(contactsData);
             
             // Apply current search and sort filters to the locally stored data
             filterAndSortContacts();
@@ -1558,6 +2646,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const cached = await loadCachedContactsSnapshot();
             if (cached && cached.length) {
                 contactsData = cached;
+                for (const contact of contactsData) {
+                    normalizeSavedCard(contact);
+                    await recropStoredContact(contact);
+                }
+                await cacheContactsSnapshot(contactsData);
                 updateTagFilterOptions();
                 updateFollowUpHint();
                 filterAndSortContacts();
@@ -1679,7 +2772,6 @@ document.addEventListener('DOMContentLoaded', () => {
         
         // Create updated contact object, preserving all original fields
         const updatedContact = {
-            ...originalContact,  // Preserve all original fields including imageUrl
             name: document.getElementById('editName').value,
             title: document.getElementById('editTitle').value,
             company: document.getElementById('editCompany').value,
@@ -1700,9 +2792,7 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const response = await fetch(`${API_URL}/contacts/${originalContact.cardId}?userId=${encodeURIComponent(userId)}`, {
                 method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
+                headers: authHeaders(),
                 body: JSON.stringify(updatedContact)
             });
 
@@ -1710,22 +2800,65 @@ document.addEventListener('DOMContentLoaded', () => {
                 throw new Error('Failed to update contact');
             }
 
-            // Update local data
-            const index = contactsData.findIndex(c => c.cardId === originalContact.cardId);
+            const persisted = normalizeSavedCard({
+                ...originalContact,
+                ...updatedContact,
+                originalImageUrl: originalContact.originalImageUrl,
+                originalBackImageUrl: originalContact.originalBackImageUrl,
+                frontImage: originalContact.frontImage || originalContact.originalImageUrl,
+                backImage: originalContact.backImage || originalContact.originalBackImageUrl,
+                cachedImageUrl: originalContact.cachedImageUrl,
+                imageUrl: originalContact.imageUrl || 'db:front',
+                backImageUrl: originalContact.backImageUrl,
+                hasImage: originalContact.hasImage !== false,
+                hasBackImage: Boolean(originalContact.hasBackImage || originalContact.backImageUrl),
+                updatedAt: new Date().toISOString(),
+            });
+            applySyncedImagePointers(persisted);            const index = contactsData.findIndex(c => c.cardId === originalContact.cardId);
             if (index !== -1) {
-                contactsData[index] = updatedContact;
+                contactsData[index] = persisted;
             }
 
             await cacheContactsSnapshot(contactsData);
             updateTagFilterOptions();
             
-            // Close modal and update UI and visualizations
             hideEditContactModal();
             refreshAllVisualizations();
-            
-            showToast('Contact updated successfully', 'success');
+            if (activeDetailContact && activeDetailContact.cardId === persisted.cardId) {
+                openContactDetail(persisted);
+            }
+            if (pendingReviewContact && pendingReviewContact.cardId === persisted.cardId) {
+                openScanReview(persisted);
+            }
+            showToast('Card updated', 'success');
         } catch (error) {
             console.error('Error updating contact:', error);
+            const persisted = normalizeSavedCard({
+                ...originalContact,
+                ...updatedContact,
+                originalImageUrl: originalContact.originalImageUrl,
+                originalBackImageUrl: originalContact.originalBackImageUrl,
+                frontImage: originalContact.frontImage || originalContact.originalImageUrl,
+                backImage: originalContact.backImage || originalContact.originalBackImageUrl,
+                cachedImageUrl: originalContact.cachedImageUrl,
+                updatedAt: new Date().toISOString(),
+            });
+            const index = contactsData.findIndex(c => c.cardId === originalContact.cardId);
+            if (index !== -1) {
+                contactsData[index] = persisted;
+                await cacheContactsSnapshot(contactsData);
+                updateTagFilterOptions();
+                hideEditContactModal();
+                refreshAllVisualizations();
+                if (activeDetailContact && activeDetailContact.cardId === persisted.cardId) {
+                    openContactDetail(persisted);
+                }
+                if (pendingReviewContact && pendingReviewContact.cardId === persisted.cardId) {
+                    openScanReview(persisted);
+                }
+                showToast('Card updated on this device', 'success');
+                return;
+            }
             showToast('Failed to update contact', 'error');
         }
     });
@@ -2920,36 +4053,51 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Initialize the application
     async function initializeApp() {
-        try {
-            // Check if user is authenticated
-            const authenticated = await isAuthenticated();
-            
-            if (authenticated) {
-                // User is authenticated, show sign out button (hidden while auth is disabled)
-                if (!AUTH_DISABLED) {
-                    signOutBtn.classList.remove('hidden');
+        if (initializeAppPromise) return initializeAppPromise;
+        initializeAppPromise = (async () => {
+            try {
+                setBootStatus(hasStoredSessionHint()
+                    ? 'Restoring your session…'
+                    : 'Preparing Folio…');
+
+                // Optimistic restore from local cache so refresh never flashes the login screen.
+                const cachedUser = readCachedAuthUser();
+                const cachedToken = getAuthToken();
+                if (cachedUser?.id && cachedToken) {
+                    applyAuthUser(cachedUser, cachedToken);
+                    hideSignInModal();
+                    signOutBtn?.classList.remove('hidden');
+                    scanTab?.classList.add('tab-active');
+                    scanContent?.classList.remove('hidden');
                 }
-                hideSignInModal();
-                
-                // Show the default tab content immediately
-                scanTab.classList.add('tab-active');
-                scanContent.classList.remove('hidden');
-                
-                // Start loading contacts in the background
-                loadContacts().catch(error => {
-                    console.error('Error loading contacts during initialization:', error);
-                });
-        } else {
-                // User is not authenticated, show sign in modal
-            showSignInModal();
-        }
-        } catch (error) {
-            console.error('Error during initialization:', error);
-            // Show sign in modal as fallback
-            showSignInModal();
-        }
+
+                const authenticated = await isAuthenticated();
+                setupGoogleSignIn();
+
+                if (authenticated) {
+                    signOutBtn.classList.remove('hidden');
+                    hideSignInModal();
+                    scanTab.classList.add('tab-active');
+                    scanContent.classList.remove('hidden');
+                    setBootStatus('Welcome back');
+                    loadContacts().catch((error) => {
+                        console.error('Error loading contacts during initialization:', error);
+                    });
+                } else {
+                    setBootStatus('Ready to sign in');
+                    showSignInModal();
+                }
+            } catch (error) {
+                console.error('Error during initialization:', error);
+                if (!userId) showSignInModal();
+            } finally {
+                authReady = true;
+                dismissBootSplash();
+            }
+        })();
+        return initializeAppPromise;
     }
-    
+
     // Initialize the app when DOM is loaded
     initializeApp();
 
@@ -2973,9 +4121,7 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const response = await fetch(`${API_URL}/contacts`, {
                 method: 'DELETE',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
+                headers: authHeaders(),
                 body: JSON.stringify({ userId: userId })
             });
                     
@@ -3010,9 +4156,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Initialize the app when DOM is loaded
-    initializeApp();
-
     // Add delete confirmation modal HTML after the deleteAllModal
     const deleteContactModal = document.createElement('div');
     deleteContactModal.id = 'deleteContactModal';
@@ -3044,9 +4187,7 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const response = await fetch(`${API_URL}/contacts/${cardId}?userId=${encodeURIComponent(userId)}`, {
                 method: 'DELETE',
-                headers: {
-                    'Content-Type': 'application/json'
-                }
+                headers: authHeaders(),
             });
 
             if (!response.ok) {
@@ -3134,7 +4275,9 @@ document.addEventListener('DOMContentLoaded', () => {
             
             // Add each contact's vCard to the zip
             for (const contact of contactsData) {
-                const response = await fetch(`${API_URL}/vcard/${contact.cardId}?userId=${encodeURIComponent(userId)}`);
+                const response = await fetch(`${API_URL}/vcard/${contact.cardId}?userId=${encodeURIComponent(userId)}`, {
+                headers: authHeaders(),
+            });
                 if (!response.ok) throw new Error(`Failed to download vCard for ${contact.name}`);
                 
                 const vcardContent = await response.text();
@@ -3168,83 +4311,71 @@ document.addEventListener('DOMContentLoaded', () => {
     window.showToast = showToast;
     window.deleteContact = deleteContact;
     window.showEditContactModal = showEditContactModal;
+    window.openContactDetail = openContactDetail;
 
     // Update sign-in form submission
+    signInModeToggle?.addEventListener('click', () => {
+        setSignInMode(!signInIsRegister);
+    });
+
     signInForm.addEventListener('submit', async (e) => {
         e.preventDefault();
-        
+
         const username = document.getElementById('username').value.trim();
         const password = document.getElementById('password').value;
-        
-        // Input validation
+        const submitBtn = signInForm.querySelector('button[type="submit"]');
+
         if (!username || !password) {
             signInError.textContent = 'Please enter both username and password';
             signInError.classList.remove('hidden');
             return;
         }
-        
-        const authenticationData = {
-            Username: username,
-            Password: password
-        };
-        
-        const authenticationDetails = new AmazonCognitoIdentity.AuthenticationDetails(authenticationData);
-        
-        const userData = {
-            Username: username,
-            Pool: userPool
-        };
 
-        const cognitoUser = new AmazonCognitoIdentity.CognitoUser(userData);
-        
         try {
-            await new Promise((resolve, reject) => {
-                cognitoUser.authenticateUser(authenticationDetails, {
-                    onSuccess: (result) => {
-                        userId = result.getIdToken().payload.sub;
-                                resolve(result);
-                    },
-                    onFailure: (err) => {
-                        reject(err);
-                    }
-                });
+            if (submitBtn) submitBtn.disabled = true;
+            showAuthLoading(
+                signInIsRegister ? 'Creating your account…' : 'Signing you in…',
+                'Hang tight — this can take a few seconds.'
+            );
+            const path = signInIsRegister ? '/auth/register' : '/auth/login';
+            const response = await fetch(`${API_URL}${path}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({ username, password }),
             });
-            
-            // Hide sign in modal and show sign out button
-            hideSignInModal();
-            signOutBtn.classList.remove('hidden');
-            
-            // Immediately show the default tab content (scan tab)
-            switchToTab('scan');
-            
-            // Start loading contacts in the background
-            loadContacts().catch(error => {
-                console.error('Error loading contacts in background:', error);
-                showToast('Error loading contacts after sign in', 'error');
-            });
-            
-            showToast('Signed in successfully', 'success');
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to sign in');
+            }
+            finishAuthenticatedSession(
+                data.user,
+                data.token,
+                signInIsRegister ? 'Account created' : 'Signed in'
+            );
         } catch (error) {
             console.error('Authentication error:', error);
+            hideAuthLoading();
             signInError.textContent = error.message || 'Failed to sign in. Please check your credentials.';
             signInError.classList.remove('hidden');
+        } finally {
+            if (submitBtn) submitBtn.disabled = false;
         }
     });
 
-    // Update sign-out functionality
-    signOutBtn.addEventListener('click', () => {
-        const cognitoUser = userPool.getCurrentUser();
-        if (cognitoUser) {
-            cognitoUser.signOut();
-        }
-        userId = null; // Clear the userId
-        contactsData = []; // Clear contacts data
-        signOutBtn.classList.add('hidden');
-            showSignInModal();
+    signOutBtn.addEventListener('click', async () => {
+        showAuthLoading('Signing you out…', 'Clearing this device session.');
+        try {
+            await fetch(`${API_URL}/auth/logout`, {
+                method: 'POST',
+                headers: authHeaders(),
+                credentials: 'include',
+            });
+        } catch (err) { /* ignore */ }
+        clearAuthSession();
+        hideAuthLoading();
+        showSignInModal();
         switchToTab('scan');
-        
-        // Clear any cached data
-        localStorage.clear();
     });
 
     // Process files in batches with concurrency control
@@ -3375,12 +4506,25 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    async function ingestPairedSides(frontFile, backFile) {
-        const sides = [frontFile, backFile].filter(Boolean);
+    async function ingestPairedSides(frontFile, backFile, options = {}) {
+        let front = frontFile;
+        let back = backFile;
+        if (!options.alreadyCropped) {
+            if (front) {
+                front = await cropAndConfirm(front, 'front');
+                if (!front) return;
+            }
+            if (back) {
+                back = await cropAndConfirm(back, 'back');
+                if (!back) return;
+            }
+        }
+        const sides = [front, back].filter(Boolean);
         if (!sides.length) return;
         if (processingStatus) processingStatus.textContent = sides.length > 1 ? 'Reading both sides…' : 'Reading card text…';
-        resetBtn.classList.remove('hidden');
-        uploadProgress.textContent = sides.length > 1 ? 'Saving front and back as one contact' : 'Saving contact';
+        setScanProcessing(true, 'Reading your card', sides.length > 1 ? 'Front and back together' : 'This usually takes a few seconds');
+        resetBtn.classList.add('hidden');
+        uploadProgress.textContent = '';
         thumbnailGallery.innerHTML = '';
         setUploadShimmer(true);
         sides.forEach((file, index) => {
@@ -3394,9 +4538,18 @@ document.addEventListener('DOMContentLoaded', () => {
                 scanCompleteMessage.classList.remove('hidden');
                 scanCompleteMessage.classList.add('success-banner');
                 celebrateScanSuccess();
-                showToast(sides.length > 1 ? 'Saved both sides as one contact' : 'Card saved', 'success');
+                const saved = normalizeSavedCard(result.contacts[0]);
                 await loadContacts();
                 refreshAllVisualizations();
+                const fresh = contactsData.find((c) => c.cardId === saved.cardId) || saved;
+                openScanReview({
+                    ...fresh,
+                    originalImageUrl: saved.originalImageUrl || fresh.originalImageUrl,
+                    originalBackImageUrl: saved.originalBackImageUrl || fresh.originalBackImageUrl,
+                    frontImage: saved.frontImage || fresh.frontImage,
+                    backImage: saved.backImage || fresh.backImage,
+                    cachedImageUrl: saved.originalImageUrl || fresh.cachedImageUrl,
+                });
             } else {
                 showToast('Could not save this card', 'error');
             }
@@ -3405,8 +4558,10 @@ document.addEventListener('DOMContentLoaded', () => {
             sides.forEach((_, index) => updateThumbnailStatus(index, false));
             showToast(error.message || 'Failed to process this card', 'error');
         } finally {
+            setScanProcessing(false);
             setUploadShimmer(false);
             if (processingStatus) processingStatus.textContent = '';
+            uploadProgress.textContent = '';
             if (fileUpload) fileUpload.value = '';
             const backInput = document.getElementById('fileUploadBack');
             if (backInput) backInput.value = '';
@@ -3427,7 +4582,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (options.pairSides) {
-            await ingestPairedSides(files[0], files[1]);
+            await ingestPairedSides(files[0], files[1], { alreadyCropped: options.alreadyCropped });
             return;
         }
 
@@ -3462,6 +4617,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 await ingestPairedSides(files[0], files[1]);
                 return;
             }
+        }
+
+        if (files.length === 1) {
+            await ingestPairedSides(files[0], null, { alreadyCropped: options.alreadyCropped });
+            return;
         }
 
         // Maximum number of files allowed to upload at once
@@ -3519,8 +4679,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Initialize UI
         if (processingStatus) processingStatus.textContent = 'Preparing to process images...';
-        resetBtn.classList.remove('hidden');
-        uploadProgress.textContent = `Preparing to process ${files.length} images`;
+        setScanProcessing(true, 'Reading your cards', `Preparing ${files.length} images`);
+        resetBtn.classList.add('hidden');
+        uploadProgress.textContent = '';
         thumbnailGallery.innerHTML = ''; // Clear existing thumbnails
         setUploadShimmer(true);
 
@@ -3620,6 +4781,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (processingStatus) processingStatus.textContent = '';
             uploadProgress.textContent = '';
         } finally {
+            setScanProcessing(false);
             setUploadShimmer(false);
             // Reset the file input to allow selecting the same files again if needed
             fileUpload.value = '';
@@ -3779,11 +4941,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const scanMascotLive = document.getElementById('scanMascotLive');
     const cameraFlipBar = document.getElementById('cameraFlipBar');
     const cameraSkipBackBtn = document.getElementById('cameraSkipBackBtn');
+    const cameraCardGuide = document.getElementById('cameraCardGuide');
+    const cameraAlignHint = document.getElementById('cameraAlignHint');
     let cameraOpenBusy = false;
     let cameraStream = null;
     let cameraCapturing = false;
     let pendingFrontFile = null;
     let awaitingBackSide = false;
+    let alignTimer = null;
+    let alignHits = 0;
+    const alignProbe = document.createElement('canvas');
 
     function setCameraSideChip(label) {
         const chip = document.getElementById('cameraSideChip');
@@ -3793,6 +4960,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function hideFlipBar() {
         cameraFlipBar?.classList.add('hidden');
+        cameraPanel?.classList.remove('is-awaiting-back');
         const thumb = document.getElementById('cameraFlipThumb');
         if (thumb?.src?.startsWith('blob:')) {
             URL.revokeObjectURL(thumb.src);
@@ -3805,6 +4973,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const thumb = document.getElementById('cameraFlipThumb');
         if (thumb) thumb.src = URL.createObjectURL(file);
         cameraFlipBar?.classList.remove('hidden');
+        cameraPanel?.classList.add('is-awaiting-back');
         setCameraSideChip('Back');
     }
 
@@ -3847,14 +5016,129 @@ document.addEventListener('DOMContentLoaded', () => {
         if (scanMascotLive) scanMascotLive.src = src;
     }
 
+    function setGuideAligned(aligned) {
+        cameraCardGuide?.classList.toggle('is-aligned', aligned);
+        cameraPanel?.classList.toggle('is-aligned', aligned);
+        if (cameraAlignHint) {
+            cameraAlignHint.textContent = aligned
+                ? 'Perfect — tap capture'
+                : 'Fit the card inside the rectangle';
+        }
+    }
+
+    function stopGuideAlignLoop() {
+        if (alignTimer) {
+            window.clearTimeout(alignTimer);
+            alignTimer = null;
+        }
+        alignHits = 0;
+        setGuideAligned(false);
+    }
+
+    function scoreCardInGuide(videoEl, guideEl) {
+        if (!videoEl?.videoWidth || !guideEl) return 0;
+        const box = mapOverlayToSourceBox(videoEl, guideEl, videoEl.videoWidth, videoEl.videoHeight);
+        if (!box || box.width < 24 || box.height < 16) return 0;
+        const pad = Math.min(box.width, box.height) * 0.16;
+        const region = {
+            x: Math.max(0, box.x - pad),
+            y: Math.max(0, box.y - pad),
+            width: box.width + pad * 2,
+            height: box.height + pad * 2,
+        };
+        region.width = Math.min(videoEl.videoWidth - region.x, region.width);
+        region.height = Math.min(videoEl.videoHeight - region.y, region.height);
+        const pw = 220;
+        const ph = Math.max(24, Math.round(pw * (region.height / Math.max(1, region.width))));
+        alignProbe.width = pw;
+        alignProbe.height = ph;
+        const ctx = alignProbe.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(videoEl, region.x, region.y, region.width, region.height, 0, 0, pw, ph);
+
+        if (window.FolioCrop?.detectQuad) {
+            const found = FolioCrop.detectQuad(alignProbe);
+            if (!found || found.method === 'fallback' || found.score < 0.3) return 0;
+            const xs = found.quad.map((p) => p[0]);
+            const ys = found.quad.map((p) => p[1]);
+            const minX = Math.min(...xs);
+            const maxX = Math.max(...xs);
+            const minY = Math.min(...ys);
+            const maxY = Math.max(...ys);
+            const bw = Math.max(1, maxX - minX);
+            const bh = Math.max(1, maxY - minY);
+            const gx = ((box.x - region.x) / region.width) * pw;
+            const gy = ((box.y - region.y) / region.height) * ph;
+            const gw = (box.width / region.width) * pw;
+            const gh = (box.height / region.height) * ph;
+            const overlapW = Math.max(0, Math.min(maxX, gx + gw) - Math.max(minX, gx));
+            const overlapH = Math.max(0, Math.min(maxY, gy + gh) - Math.max(minY, gy));
+            const overlap = overlapW * overlapH;
+            const guideCover = overlap / Math.max(1, gw * gh);
+            const cardInside = overlap / (bw * bh);
+            const aspect = bw / bh;
+            if (guideCover < 0.72 || cardInside < 0.78) return 0;
+            if (aspect < 1.28 || aspect > 2.15) return 0;
+            const ordered = FolioCrop.orderCorners(found.quad);
+            const skewY = Math.abs(ordered[0][1] - ordered[1][1]) / ph;
+            const skewX = Math.abs(ordered[0][0] - ordered[3][0]) / pw;
+            if (skewY > 0.1 || skewX > 0.1) return 0;
+            return found.score;
+        }
+
+        let data;
+        try {
+            data = ctx.getImageData(0, 0, pw, ph).data;
+        } catch (err) {
+            return 0;
+        }
+        const luma = new Uint8Array(pw * ph);
+        let sum = 0;
+        for (let i = 0; i < luma.length; i += 1) {
+            const j = i * 4;
+            const v = (data[j] * 299 + data[j + 1] * 587 + data[j + 2] * 114) / 1000;
+            luma[i] = v;
+            sum += v;
+        }
+        const mean = sum / luma.length;
+        let varSum = 0;
+        for (let i = 0; i < luma.length; i += 1) {
+            const d = luma[i] - mean;
+            varSum += d * d;
+        }
+        const std = Math.sqrt(varSum / luma.length);
+        if (mean < 88 || mean > 236 || std < 14 || std > 58) return 0;
+        return Math.min(1, std / 32);
+    }
+
+    function tickGuideAlign() {
+        if (!cameraStream || cameraCapturing) {
+            alignTimer = window.setTimeout(tickGuideAlign, 180);
+            return;
+        }
+        const score = scoreCardInGuide(cameraVideo, cameraCardGuide);
+        if (score >= 0.42) alignHits += 1;
+        else alignHits = Math.max(0, alignHits - 1);
+        setGuideAligned(alignHits >= 3);
+        alignTimer = window.setTimeout(tickGuideAlign, 160);
+    }
+
+    function startGuideAlignLoop() {
+        stopGuideAlignLoop();
+        alignTimer = window.setTimeout(tickGuideAlign, 220);
+    }
+
     function setCameraLiveUi(isLive) {
         cameraPanel?.classList.toggle('is-live', isLive);
+        document.body.classList.toggle('camera-live', isLive);
         cameraIdle?.classList.toggle('hidden', isLive);
         cameraLiveUi?.classList.toggle('hidden', !isLive);
         setMascotSrc(isLive ? 'assets/mascot-scanning.svg' : 'assets/mascot-idle.svg');
+        if (isLive) startGuideAlignLoop();
+        else stopGuideAlignLoop();
     }
 
     function stopLiveCamera() {
+        stopGuideAlignLoop();
         if (cameraStream) {
             cameraStream.getTracks().forEach((track) => track.stop());
             cameraStream = null;
@@ -3873,7 +5157,7 @@ document.addEventListener('DOMContentLoaded', () => {
         awaitingBackSide = false;
         stopLiveCamera();
         if (pending) {
-            await ingestImageFiles([pending], { skipPairPrompt: true });
+            await ingestImageFiles([pending], { skipPairPrompt: true, alreadyCropped: true });
         }
     }
 
@@ -3943,9 +5227,7 @@ document.addEventListener('DOMContentLoaded', () => {
     async function startLiveCamera(fromEl, options = {}) {
         const fallbackToLibrary = options.fallbackToLibrary !== false;
         if (cameraOpenBusy) return;
-        if (AUTH_DISABLED) {
-            userId = TEMP_USER_ID;
-        } else if (!userId) {
+        if (!userId) {
             showToast('Please sign in to upload files', 'error');
             showSignInModal();
             return;
@@ -3997,9 +5279,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function openPhotoLibrary(fromEl) {
         if (!fileUpload) return;
-        if (AUTH_DISABLED) {
-            userId = TEMP_USER_ID;
-        } else if (!userId) {
+        if (!userId) {
             showToast('Please sign in to upload files', 'error');
             showSignInModal();
             return;
@@ -4027,16 +5307,22 @@ document.addEventListener('DOMContentLoaded', () => {
             cameraCanvas.width = width;
             cameraCanvas.height = height;
             const ctx = cameraCanvas.getContext('2d');
-            // Draw the real camera frame (never mirrored) so OCR can read the card
             ctx.setTransform(1, 0, 0, 1, 0, 0);
             ctx.drawImage(cameraVideo, 0, 0, width, height);
 
-            const blob = await new Promise((resolve) => {
-                cameraCanvas.toBlob(resolve, 'image/jpeg', 0.92);
+            const guide = document.getElementById('cameraCardGuide');
+            const framed = cropCanvasToGuide(cameraCanvas, cameraVideo, guide);
+            const file = await new Promise((resolve, reject) => {
+                framed.toBlob((blob) => {
+                    if (!blob) {
+                        reject(new Error('Capture failed'));
+                        return;
+                    }
+                    const side = awaitingBackSide ? 'back' : 'front';
+                    resolve(new File([blob], `folio-frame-${side}-${Date.now()}.jpg`, { type: 'image/jpeg' }));
+                }, 'image/jpeg', 0.92);
             });
-            if (!blob) throw new Error('Capture failed');
 
-            const file = new File([blob], `folio-card-${Date.now()}.jpg`, { type: 'image/jpeg' });
             if (awaitingBackSide && pendingFrontFile) {
                 const front = pendingFrontFile;
                 pendingFrontFile = null;
@@ -4044,22 +5330,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 hideFlipBar();
                 stopLiveCamera();
                 setMascotSrc('assets/mascot-scanning.svg');
-                await ingestImageFiles([front, file], { pairSides: true });
+                await ingestImageFiles([front, file], { pairSides: true, alreadyCropped: true });
                 return;
             }
 
             pendingFrontFile = file;
             awaitingBackSide = true;
             showFlipBar(file);
-            showToast('Front captured — flip the card for the back');
+            showToast('Now scan the back side, or skip if there is no back');
         } catch (err) {
             console.error(err);
             showToast('Could not capture photo', 'error');
         } finally {
             window.setTimeout(() => {
                 cleanup();
-                cameraCapturing = false;
             }, reduceMotion ? 0 : 420);
+            cameraCapturing = false;
         }
     }
 
@@ -4078,6 +5364,12 @@ document.addEventListener('DOMContentLoaded', () => {
         e.stopPropagation();
         closeCameraAndMaybeSave();
     });
+    cameraFlipBar?.addEventListener('click', (e) => {
+        if (!e.target.closest('#cameraSkipBackBtn, .camera-panel__flip-skip')) return;
+        e.preventDefault();
+        e.stopPropagation();
+        closeCameraAndMaybeSave();
+    }, true);
     cameraLibraryBtn?.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -4097,8 +5389,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const sub = document.getElementById('cameraIdleSub');
         if (!sub) return;
         sub.textContent = isWideAppLayout()
-            ? 'Drop card photos here · or open webcam · add the back if needed'
-            : 'Tap to open live camera · capture front · add the back if needed';
+            ? 'Drop a card photo, or open the webcam rectangle'
+            : 'Fit the visiting card inside the rectangle';
     }
 
     updateScanIdleCopy();
@@ -4395,7 +5687,9 @@ document.addEventListener('DOMContentLoaded', () => {
     async function syncMyCardFromApi() {
         if (!userId || !navigator.onLine) return;
         try {
-            const res = await fetch(`${API_URL}/profile?userId=${encodeURIComponent(userId)}`);
+            const res = await fetch(`${API_URL}/profile?userId=${encodeURIComponent(userId)}`, {
+                headers: authHeaders(),
+            });
             if (!res.ok) return;
             const data = await res.json();
             if (data?.profile?.name) {
@@ -4424,7 +5718,7 @@ document.addEventListener('DOMContentLoaded', () => {
             try {
                 const res = await fetch(`${API_URL}/profile`, {
                     method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: authHeaders(),
                     body: JSON.stringify({ ...card, userId }),
                 });
                 if (res.status === 409) {
@@ -5007,9 +6301,12 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // Boot splash: hide once first paint + auth path ready
+    // Boot splash: keep until auth restore finishes (fallback max wait)
     window.addEventListener('load', () => {
-        setTimeout(dismissBootSplash, 180);
+        if (authReady) dismissBootSplash();
     });
-    setTimeout(dismissBootSplash, 2200);
+    setTimeout(() => {
+        if (!authReady) setBootStatus('Still connecting…');
+    }, 4000);
+    setTimeout(dismissBootSplash, 15000);
 });

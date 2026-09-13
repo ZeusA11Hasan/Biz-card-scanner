@@ -121,6 +121,71 @@ Resources:
             Ref: "MainAPIGateway"
       Principal: "apigateway.amazonaws.com"
     Type: "AWS::Lambda::Permission"
+  MainFunctionPostVCardPermissionProd:
+    Properties:
+      FunctionName:
+        Ref: "MainFunction"
+      Action: "lambda:InvokeFunction"
+      SourceArn:
+        Fn::Sub:
+        - "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${__ApiId__}/${__Stage__}/POST/vcard"
+        - __Stage__: "*"
+          __ApiId__:
+            Ref: "MainAPIGateway"
+      Principal: "apigateway.amazonaws.com"
+    Type: "AWS::Lambda::Permission"
+  MainFunctionGetProfilePermissionProd:
+    Properties:
+      FunctionName:
+        Ref: "MainFunction"
+      Action: "lambda:InvokeFunction"
+      SourceArn:
+        Fn::Sub:
+        - "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${__ApiId__}/${__Stage__}/GET/profile"
+        - __Stage__: "*"
+          __ApiId__:
+            Ref: "MainAPIGateway"
+      Principal: "apigateway.amazonaws.com"
+    Type: "AWS::Lambda::Permission"
+  MainFunctionPutProfilePermissionProd:
+    Properties:
+      FunctionName:
+        Ref: "MainFunction"
+      Action: "lambda:InvokeFunction"
+      SourceArn:
+        Fn::Sub:
+        - "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${__ApiId__}/${__Stage__}/PUT/profile"
+        - __Stage__: "*"
+          __ApiId__:
+            Ref: "MainAPIGateway"
+      Principal: "apigateway.amazonaws.com"
+    Type: "AWS::Lambda::Permission"
+  MainFunctionGetPublicProfilePermissionProd:
+    Properties:
+      FunctionName:
+        Ref: "MainFunction"
+      Action: "lambda:InvokeFunction"
+      SourceArn:
+        Fn::Sub:
+        - "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${__ApiId__}/${__Stage__}/GET/profile/*"
+        - __Stage__: "*"
+          __ApiId__:
+            Ref: "MainAPIGateway"
+      Principal: "apigateway.amazonaws.com"
+    Type: "AWS::Lambda::Permission"
+  MainFunctionGetProfileVCardPermissionProd:
+    Properties:
+      FunctionName:
+        Ref: "MainFunction"
+      Action: "lambda:InvokeFunction"
+      SourceArn:
+        Fn::Sub:
+        - "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${__ApiId__}/${__Stage__}/GET/vcard/profile/*"
+        - __Stage__: "*"
+          __ApiId__:
+            Ref: "MainAPIGateway"
+      Principal: "apigateway.amazonaws.com"
+    Type: "AWS::Lambda::Permission"
   MainDynamoDBTable:
     Properties:
       BillingMode: "PAY_PER_REQUEST"
@@ -613,6 +678,184 @@ Resources:
               consumes:
               - "application/json"
           /vcard/{cardId}:
+            options:
+              summary: "CORS support"
+              produces:
+              - "application/json"
+              responses:
+                "200":
+                  headers:
+                    Access-Control-Max-Age:
+                      type: "integer"
+                    Access-Control-Allow-Origin:
+                      type: "string"
+                    Access-Control-Allow-Headers:
+                      type: "string"
+                    Access-Control-Allow-Methods:
+                      type: "string"
+                    Access-Control-Allow-Credentials:
+                      type: "string"
+                  description: "Default response for CORS method"
+              x-amazon-apigateway-integration:
+                type: "mock"
+                responses:
+                  default:
+                    responseTemplates:
+                      application/json: "{}\n"
+                    responseParameters:
+                      method.response.header.Access-Control-Max-Age: "'3600'"
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token,X-Amz-User-Agent'"
+                      method.response.header.Access-Control-Allow-Origin:
+                        Fn::Sub: "'https://${DomainName}'"
+                      method.response.header.Access-Control-Allow-Credentials: "'true'"
+                      method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+                    statusCode: "200"
+                requestTemplates:
+                  application/json: "{\n  \"statusCode\" : 200\n}\n"
+              consumes:
+              - "application/json"
+            get:
+              x-amazon-apigateway-integration:
+                httpMethod: "POST"
+                type: "aws_proxy"
+                uri:
+                  Fn::Sub: "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MainFunction.Arn}/invocations"
+          /vcard:
+            options:
+              summary: "CORS support"
+              produces:
+              - "application/json"
+              responses:
+                "200":
+                  headers:
+                    Access-Control-Max-Age:
+                      type: "integer"
+                    Access-Control-Allow-Origin:
+                      type: "string"
+                    Access-Control-Allow-Headers:
+                      type: "string"
+                    Access-Control-Allow-Methods:
+                      type: "string"
+                    Access-Control-Allow-Credentials:
+                      type: "string"
+                  description: "Default response for CORS method"
+              x-amazon-apigateway-integration:
+                type: "mock"
+                responses:
+                  default:
+                    responseTemplates:
+                      application/json: "{}\n"
+                    responseParameters:
+                      method.response.header.Access-Control-Max-Age: "'3600'"
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token,X-Amz-User-Agent'"
+                      method.response.header.Access-Control-Allow-Origin:
+                        Fn::Sub: "'https://${DomainName}'"
+                      method.response.header.Access-Control-Allow-Credentials: "'true'"
+                      method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+                    statusCode: "200"
+                requestTemplates:
+                  application/json: "{\n  \"statusCode\" : 200\n}\n"
+              consumes:
+              - "application/json"
+            post:
+              x-amazon-apigateway-integration:
+                httpMethod: "POST"
+                type: "aws_proxy"
+                uri:
+                  Fn::Sub: "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MainFunction.Arn}/invocations"
+          /vcard/profile/{slug}:
+            options:
+              summary: "CORS support"
+              produces:
+              - "application/json"
+              responses:
+                "200":
+                  headers:
+                    Access-Control-Max-Age:
+                      type: "integer"
+                    Access-Control-Allow-Origin:
+                      type: "string"
+                    Access-Control-Allow-Headers:
+                      type: "string"
+                    Access-Control-Allow-Methods:
+                      type: "string"
+                    Access-Control-Allow-Credentials:
+                      type: "string"
+                  description: "Default response for CORS method"
+              x-amazon-apigateway-integration:
+                type: "mock"
+                responses:
+                  default:
+                    responseTemplates:
+                      application/json: "{}\n"
+                    responseParameters:
+                      method.response.header.Access-Control-Max-Age: "'3600'"
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token,X-Amz-User-Agent'"
+                      method.response.header.Access-Control-Allow-Origin:
+                        Fn::Sub: "'https://${DomainName}'"
+                      method.response.header.Access-Control-Allow-Credentials: "'true'"
+                      method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+                    statusCode: "200"
+                requestTemplates:
+                  application/json: "{\n  \"statusCode\" : 200\n}\n"
+              consumes:
+              - "application/json"
+            get:
+              x-amazon-apigateway-integration:
+                httpMethod: "POST"
+                type: "aws_proxy"
+                uri:
+                  Fn::Sub: "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MainFunction.Arn}/invocations"
+          /profile:
+            options:
+              summary: "CORS support"
+              produces:
+              - "application/json"
+              responses:
+                "200":
+                  headers:
+                    Access-Control-Max-Age:
+                      type: "integer"
+                    Access-Control-Allow-Origin:
+                      type: "string"
+                    Access-Control-Allow-Headers:
+                      type: "string"
+                    Access-Control-Allow-Methods:
+                      type: "string"
+                    Access-Control-Allow-Credentials:
+                      type: "string"
+                  description: "Default response for CORS method"
+              x-amazon-apigateway-integration:
+                type: "mock"
+                responses:
+                  default:
+                    responseTemplates:
+                      application/json: "{}\n"
+                    responseParameters:
+                      method.response.header.Access-Control-Max-Age: "'3600'"
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token,X-Amz-User-Agent'"
+                      method.response.header.Access-Control-Allow-Origin:
+                        Fn::Sub: "'https://${DomainName}'"
+                      method.response.header.Access-Control-Allow-Credentials: "'true'"
+                      method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+                    statusCode: "200"
+                requestTemplates:
+                  application/json: "{\n  \"statusCode\" : 200\n}\n"
+              consumes:
+              - "application/json"
+            get:
+              x-amazon-apigateway-integration:
+                httpMethod: "POST"
+                type: "aws_proxy"
+                uri:
+                  Fn::Sub: "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MainFunction.Arn}/invocations"
+            put:
+              x-amazon-apigateway-integration:
+                httpMethod: "POST"
+                type: "aws_proxy"
+                uri:
+                  Fn::Sub: "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MainFunction.Arn}/invocations"
+          /profile/{slug}:
             options:
               summary: "CORS support"
               produces:

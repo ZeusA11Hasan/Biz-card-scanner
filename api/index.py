@@ -21,7 +21,7 @@ app = FastAPI(title='Folio')
 
 API_ROOTS = {
     'api', 'scan', 'contacts', 'network', 'chat', 'images',
-    'vcard', 'profile', 'health',
+    'vcard', 'profile', 'health', 'auth',
 }
 
 PATH_PARAM_PATTERNS = (
@@ -59,7 +59,7 @@ def is_api_path(path: str) -> bool:
 
 def resolve_static(path: str):
     relative = 'index.html' if path in ('', '/') else path.lstrip('/')
-    for folder in (PUBLIC_DIR, FRONTEND_DIR):
+    for folder in (FRONTEND_DIR, PUBLIC_DIR):
         candidate = (folder / relative).resolve()
         try:
             candidate.relative_to(folder.resolve())
@@ -86,7 +86,19 @@ def to_starlette_response(result: dict) -> Response:
 @app.get('/api/health')
 @app.get('/health')
 def health():
-    return {'ok': True, 'service': 'folio'}
+    from app import env_any
+    from auth import auth_enabled, google_client_id
+    from store import storage_kind
+    return {
+        'ok': True,
+        'service': 'folio',
+        'vision': bool(env_any('OPENROUTER_API_KEY', 'openrouter_api_key', 'GEMINI_API_KEY')),
+        'parser': bool(env_any('OPENROUTER_API_KEY', 'openrouter_api_key', 'DEEPSEEK_API_KEY')),
+        'db': storage_kind(),
+        'images': 'postgres' if storage_kind() == 'postgres' else 'store',
+        'auth': auth_enabled(),
+        'google': bool(google_client_id()),
+    }
 
 
 @app.api_route('/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'HEAD'])
