@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Folio</title>
     <meta name="description" content="Scan business cards into a calm, searchable network.">
-    <meta name="theme-color" content="#1B2A4A" media="(prefers-color-scheme: light)">
-    <meta name="theme-color" content="#1B2A4A" media="(prefers-color-scheme: dark)">
-    <meta name="color-scheme" content="light">
+    <meta name="theme-color" content="#0A0C14" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#0A0C14" media="(prefers-color-scheme: dark)">
+    <meta name="color-scheme" content="dark">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -26,46 +26,44 @@
     <link rel="dns-prefetch" href="https://d3js.org">
     <link rel="dns-prefetch" href="https://cdnjs.cloudflare.com">
     <link rel="preconnect" href="https://accounts.google.com" crossorigin>
-    <link rel="preload" href="/styles.css?v=30" as="style">
+    <link rel="preload" href="/styles.css?v=39" as="style">
     <link rel="preload" href="/android-chrome-192x192.png" as="image">
     <style>
       /* Critical boot splash — paints before CSS bundle */
-      html, body { margin: 0; min-height: 100%; background: #F4F0E8; }
+      html, body { margin: 0; min-height: 100%; background: #0A0C14; }
       #folioBoot {
         position: fixed; inset: 0; z-index: 9999;
         display: grid; place-items: center;
         background:
-          radial-gradient(900px 480px at 50% 20%, #fff9f0 0%, transparent 55%),
-          linear-gradient(180deg, #f3efe6 0%, #e8e1d4 100%);
-        transition: opacity 0.45s ease, visibility 0.45s ease;
+          radial-gradient(900px 560px at 12% -8%, rgba(96, 140, 255, 0.42) 0%, transparent 55%),
+          radial-gradient(780px 520px at 92% 8%, rgba(186, 120, 255, 0.28) 0%, transparent 52%),
+          linear-gradient(165deg, #101528 0%, #0a0c14 100%);
+        transition: opacity 0.4s ease, visibility 0.4s ease;
       }
       #folioBoot.is-done { opacity: 0; visibility: hidden; pointer-events: none; }
       #folioBoot .boot-mark {
-        width: 88px; height: 88px; border-radius: 22px;
-        background: #faf7f1; border: 3px solid #1b2a4a;
-        display: grid; place-items: center;
-        font-family: Georgia, "Times New Roman", serif;
-        font-size: 2.4rem; font-weight: 700; color: #1b2a4a;
-        box-shadow: 0 14px 36px rgba(27,42,74,0.1);
-        animation: bootPulse 1.4s ease-in-out infinite;
-      }
-      #folioBoot .boot-word {
-        margin-top: 18px; text-align: center;
-        font-family: Georgia, "Times New Roman", serif;
-        font-size: 2rem; font-weight: 700; color: #1b2a4a;
+        width: auto; height: auto; border-radius: 0;
+        background: transparent; border: none;
+        display: block;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
+        font-size: 34px; font-weight: 650; color: #f5f7ff;
         letter-spacing: -0.03em;
+        text-shadow: 0 1px 18px rgba(126, 182, 255, 0.35);
+        box-shadow: none;
+        animation: none;
       }
+      #folioBoot .boot-word { display: none; }
       #folioBoot .boot-sub {
-        margin-top: 6px; text-align: center;
-        font-family: system-ui, sans-serif;
-        font-size: 0.9rem; color: #5c6578;
+        margin-top: 10px; text-align: center;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        font-size: 15px; color: rgba(235, 240, 255, 0.55);
       }
       #folioBoot .boot-spinner {
-        width: 28px; height: 28px; margin: 18px auto 0;
-        border: 3px solid rgba(27,42,74,0.15);
-        border-top-color: #1b2a4a;
+        width: 22px; height: 22px; margin: 22px auto 0;
+        border: 2px solid rgba(255, 255, 255, 0.18);
+        border-top-color: rgba(255, 255, 255, 0.9);
         border-radius: 50%;
-        animation: bootSpin 0.8s linear infinite;
+        animation: bootSpin 0.75s linear infinite;
       }
       @keyframes bootPulse {
         0%, 100% { transform: translateY(0); }
@@ -98,14 +96,13 @@
         }
       })();
     </script>
-    <link href="styles.css?v=30" rel="stylesheet">
+    <link href="styles.css?v=39" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
 <body>
     <div id="folioBoot" aria-hidden="true">
         <div>
-            <div class="boot-mark">F</div>
-            <div class="boot-word">Folio</div>
+            <div class="boot-mark">Folio</div>
             <div id="folioBootSub" class="boot-sub">Checking your session…</div>
             <div class="boot-spinner" aria-hidden="true"></div>
         </div>
@@ -157,9 +154,8 @@
                 <div class="scan-layout__intro">
                 <div class="hero hero--scan">
                     <div class="hero__copy">
-                        <p class="hero-kicker">Business cards</p>
-                        <h2 class="hero-title">Scan once.<br>Keep forever.</h2>
-                        <p class="hero-sub">Turn paper cards into a calm, searchable network. Capture both sides when numbers live on the back.</p>
+                        <h2 class="hero-title">Scan</h2>
+                        <p class="hero-sub">Photograph a card, or choose a photo from your library.</p>
                     </div>
                     <div class="hero__mascot" aria-hidden="true">
                         <span class="hero__mascot-glow"></span>
@@ -326,8 +322,7 @@
             <section id="contactsContent" class="view-panel hidden">
                 <div class="saved-head">
                     <div>
-                        <p class="saved-kicker">Your network</p>
-                        <h2>Saved Cards</h2>
+                        <h2>Saved</h2>
                     </div>
                     <div class="section-actions">
                         <button id="exportCsvBtn" class="icon-btn" type="button" title="Export CSV" aria-label="Export CSV">
@@ -380,6 +375,11 @@
                 </div>
                 <p id="followUpHint" class="follow-up-hint hidden"></p>
 
+                <div id="contactsLoading" class="contacts-loading hidden" role="status" aria-live="polite" aria-busy="true">
+                    <div class="contacts-loading__spinner" aria-hidden="true"></div>
+                    <p class="contacts-loading__title">Restoring your cards…</p>
+                    <p class="contacts-loading__sub">Fetching saved contacts from your account.</p>
+                </div>
                 <div id="contactsList" class="saved-list"></div>
                 <div id="noContacts" class="saved-empty hidden">
                     <div class="saved-empty__mark" aria-hidden="true">
@@ -479,8 +479,8 @@
             <section id="networkContent" class="view-panel hidden">
                 <div class="section-head">
                     <div>
-                        <h2>Network</h2>
-                        <p>A quieter read on your connections</p>
+                    <h2>Network</h2>
+                    <p>Companies and how your contacts connect.</p>
                     </div>
                 </div>
 
@@ -1094,11 +1094,60 @@
         <button type="button" id="pwaRefreshBtn" class="pwa-update-bar__btn">Refresh</button>
     </div>
 
+    <div id="saveToPhoneModal" class="modal-overlay hidden" role="dialog" aria-labelledby="saveToPhoneTitle">
+        <div class="modal-content sheet">
+            <div class="sheet-header">
+                <h3 id="saveToPhoneTitle">Save to Phone</h3>
+                <button type="button" id="closeSaveToPhoneModal" class="icon-btn icon-btn--ghost" aria-label="Close">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="sheet-body">
+                <p class="hero-sub" style="margin:0 0 14px;">Edit details if needed, then add this person to your phone contacts.</p>
+                <form id="saveToPhoneForm">
+                    <div class="field">
+                        <label for="savePhoneName">Name</label>
+                        <input type="text" id="savePhoneName" class="form-input" autocomplete="name">
+                    </div>
+                    <div class="field">
+                        <label for="savePhoneNumber">Phone</label>
+                        <input type="tel" id="savePhoneNumber" class="form-input" autocomplete="tel" inputmode="tel">
+                    </div>
+                    <div class="field">
+                        <label for="savePhoneEmail">Email</label>
+                        <input type="email" id="savePhoneEmail" class="form-input" autocomplete="email">
+                    </div>
+                    <div class="field">
+                        <label for="savePhoneTitle">Title</label>
+                        <input type="text" id="savePhoneTitle" class="form-input" autocomplete="organization-title">
+                    </div>
+                    <div class="field">
+                        <label for="savePhoneCompany">Company</label>
+                        <input type="text" id="savePhoneCompany" class="form-input" autocomplete="organization">
+                    </div>
+                    <div class="field">
+                        <label for="savePhoneAddress">Address</label>
+                        <input type="text" id="savePhoneAddress" class="form-input" autocomplete="street-address">
+                    </div>
+                    <button type="submit" class="btn-luxury" style="width:100%;margin-top:8px;">
+                        <span>Add to Phone Contacts</span>
+                    </button>
+                    <button type="button" id="saveToPhoneShareFallback" class="btn-secondary" style="width:100%;margin-top:10px;">
+                        Didn’t open? Share to Contacts
+                    </button>
+                </form>
+                <p id="saveToPhoneHint" class="hero-sub" style="margin:12px 0 0;font-size:0.85rem;"></p>
+            </div>
+        </div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.js"></script>
     <script src="card-crop.js?v=29"></script>
-    <script src="script.js?v=30"></script>
+    <script src="script.js?v=36"></script>
 </body>
 </html>

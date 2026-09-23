@@ -1,12 +1,29 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 220" fill="none">
   <ellipse cx="100" cy="208" rx="48" ry="8" fill="#1B2A4A" opacity="0.08"/>
-  <rect x="42" y="36" width="116" height="150" rx="22" fill="#F4F0E8" stroke="#1B2A4A" stroke-width="4"/>
-  <rect x="58" y="58" width="54" height="8" rx="4" fill="#1B2A4A" opacity="0.2"/>
-  <rect x="58" y="76" width="72" height="6" rx="3" fill="#1B2A4A" opacity="0.12"/>
-  <circle cx="78" cy="124" r="7" fill="#1B2A4A"/>
-  <circle cx="112" cy="124" r="7" fill="#1B2A4A"/>
-  <path d="M84 148c8 12 24 12 32 0" stroke="#1B2A4A" stroke-width="4" stroke-linecap="round"/>
-  <path d="M148 78c18-4 28 8 24 22-3 10-14 14-24 12" fill="#C4A574"/>
-  <circle cx="156" cy="92" r="3" fill="#F4F0E8"/>
-  <circle cx="164" cy="98" r="2.2" fill="#F4F0E8" opacity="0.8"/>
+  <!-- Quiet left ear -->
+  <path d="M54 72c-14-18-4-34 12-30 8 2 14 12 12 24l-10 18-14-12z" fill="#C4A574" stroke="#1B2A4A" stroke-width="2.5" stroke-linejoin="round"/>
+  <!-- Listening right ear — grows from ear base -->
+  <g transform="translate(138 78)">
+    <g>
+      <animateTransform attributeName="transform" type="scale" values="1;1.5;1.25;1.55;1" keyTimes="0;0.35;0.5;0.65;1" dur="2.6s" repeatCount="indefinite"/>
+      <path transform="translate(-138 -78)" d="M146 72c14-18 4-34-12-30-8 2-14 12-12 24l10 18 14-12z" fill="#C4A574" stroke="#1B2A4A" stroke-width="2.5" stroke-linejoin="round"/>
+    </g>
+  </g>
+  <rect x="42" y="56" width="116" height="130" rx="22" fill="#F4F0E8" stroke="#1B2A4A" stroke-width="4"/>
+  <rect x="58" y="78" width="54" height="8" rx="4" fill="#1B2A4A" opacity="0.2"/>
+  <rect x="58" y="96" width="72" height="6" rx="3" fill="#1B2A4A" opacity="0.12"/>
+  <circle cx="78" cy="136" r="7" fill="#1B2A4A"/>
+  <circle cx="112" cy="136" r="7" fill="#1B2A4A"/>
+  <path d="M84 160c8 12 24 12 32 0" stroke="#1B2A4A" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="28" cy="90" r="2.5" fill="#C4A574">
+    <animate attributeName="cy" values="96;74;96" dur="2.4s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0;1;0" dur="2.4s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="172" cy="84" r="2" fill="#1B2A4A" opacity="0.45">
+    <animate attributeName="cy" values="90;68;90" dur="2.1s" begin="0.3s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0;0.8;0" dur="2.1s" begin="0.3s" repeatCount="indefinite"/>
+  </circle>
+  <rect x="160" y="54" width="4" height="4" rx="0.5" fill="#C4A574" transform="rotate(45 162 56)">
+    <animate attributeName="opacity" values="0;1;0" dur="2.8s" begin="0.6s" repeatCount="indefinite"/>
+  </rect>
 </svg>

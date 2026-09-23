@@ -10,6 +10,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Initialize contacts array in memory
     let contactsData = [];
+    let isLoadingContacts = false;
+    let loadContactsPromise = null;
     
     // Initialize chart objects
     window.companyDistributionChart = null;
@@ -17,6 +19,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let authReady = false;
     let authCheckPromise = null;
     let initializeAppPromise = null;
+    let ignoreDetailPopUntil = 0;
+    let phoneSaveSourceContact = null;
     
     // Check if Chart.js is available
     if (typeof Chart === 'undefined') {
@@ -38,6 +42,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const fileUpload = document.getElementById('fileUpload');
     const contactsList = document.getElementById('contactsList');
     const noContacts = document.getElementById('noContacts');
+    const contactsLoading = document.getElementById('contactsLoading');
     const searchContacts = document.getElementById('searchContacts');
     const filterByTag = document.getElementById('filterByTag');
     const filterByIndustry = document.getElementById('filterByIndustry');
@@ -84,6 +89,19 @@ document.addEventListener('DOMContentLoaded', () => {
         return { first: parts.slice(0, -1).join(' '), last: parts[parts.length - 1] };
     }
 
+    function phoneNumbers(phone) {
+        return String(phone || '')
+            .split(/[/|,;]+/)
+            .map((part) => part.trim())
+            .filter(Boolean);
+    }
+
+    function firstPhoneNumber(phone) {
+        const listed = phoneNumbers(phone);
+        const raw = listed[0] || String(phone || '').trim();
+        return raw.replace(/[^\d+]/g, '') || raw;
+    }
+
     function buildVCard(person) {
         const name = person.name || '';
         const { first, last } = splitPersonName(name);
@@ -97,8 +115,11 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (person.company) lines.push(`ORG:${escapeVCardValue(person.company)}`);
         if (person.title) lines.push(`TITLE:${escapeVCardValue(person.title)}`);
-        if (person.email) lines.push(`EMAIL;TYPE=WORK:${escapeVCardValue(person.email)}`);
-        if (person.phone) lines.push(`TEL;TYPE=CELL,VOICE:${escapeVCardValue(person.phone)}`);
+        if (person.email) lines.push(`EMAIL;TYPE=INTERNET,WORK:${escapeVCardValue(person.email)}`);
+        phoneNumbers(person.phone).forEach((phone, index) => {
+            const type = index === 0 ? 'CELL,VOICE' : 'VOICE';
+            lines.push(`TEL;TYPE=${type}:${escapeVCardValue(phone)}`);
+        });
         if (person.address) lines.push(`ADR;TYPE=WORK:;;${escapeVCardValue(person.address)};;;`);
         if (person.website) lines.push(`URL:${escapeVCardValue(normalizeHref(person.website))}`);
         if (person.profileUrl) lines.push(`URL:${escapeVCardValue(person.profileUrl)}`);
@@ -1000,9 +1021,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 contactsContent.classList.add('fade-in');
                 
                 // Show loading state if no contacts are loaded yet
-                if (contactsList && contactsData.length === 0) {
-                    contactsList.innerHTML = '<div class="empty-state"><div class="speech-bubble">Fetching your cards…</div><p>Loading contacts...</p></div>';
-                    noContacts.classList.add('hidden');
+                if (contactsData.length === 0) {
+                    showContactsLoading(
+                        'Restoring your cards…',
+                        'Fetching saved contacts from your account.'
+                    );
                 } else {
                     // Apply current filters to existing data
                     filterAndSortContacts();
@@ -1215,6 +1238,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function normalizeSavedCard(contact) {
         if (!contact) return contact;
+        scrubSideLabelsFromContact(contact);
         const front = contact.frontImage || contact.originalImageUrl || contact.cachedImageUrl || contact.imageUrl || '';
         const back = contact.backImage || contact.originalBackImageUrl || contact.backImageUrl || '';
         contact.frontImage = front;
@@ -1244,8 +1268,33 @@ document.addEventListener('DOMContentLoaded', () => {
         return `Saved ${new Date(iso).toLocaleDateString()}`;
     }
 
+    function showContactsLoading(title, subtitle) {
+        const titleEl = contactsLoading?.querySelector('.contacts-loading__title');
+        const subEl = contactsLoading?.querySelector('.contacts-loading__sub');
+        if (titleEl && title) titleEl.textContent = title;
+        if (subEl && subtitle) subEl.textContent = subtitle;
+        contactsLoading?.classList.remove('hidden');
+        noContacts?.classList.add('hidden');
+        if (contactsList && contactsData.length === 0) {
+            contactsList.innerHTML = '';
+        }
+    }
+
+    function hideContactsLoading() {
+        contactsLoading?.classList.add('hidden');
+    }
+
     function updateContactsList(contacts) {
         if (!contactsList) return;
+
+        if (isLoadingContacts && contacts.length === 0) {
+            contactsList.innerHTML = '';
+            noContacts?.classList.add('hidden');
+            contactsLoading?.classList.remove('hidden');
+            return;
+        }
+
+        hideContactsLoading();
 
         if (contacts.length === 0) {
             contactsList.innerHTML = '';
@@ -1358,10 +1407,6 @@ document.addEventListener('DOMContentLoaded', () => {
         showToast('Card saved', 'success');
     });
 
-    function firstPhoneNumber(phone) {
-        return String(phone || '').split('/')[0].replace(/[^\d+]/g, '') || String(phone || '').trim();
-    }
-
     function closeContactDetail(fromPop) {
         const view = document.getElementById('contactDetailView');
         if (!view) return;
@@ -1390,34 +1435,275 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function vcardForContact(contact) {
+        // Always build from the (possibly edited) payload so Save-to-Phone edits are included.
+        if (contact && (contact._phoneSaveDraft || !contact.cardId)) {
+            return buildVCard(contact);
+        }
         try {
             const response = await fetch(`${API_URL}/vcard/${contact.cardId}?userId=${encodeURIComponent(userId)}`, {
                 headers: authHeaders(),
+                credentials: 'include',
             });
             if (response.ok) return await response.text();
         } catch (e) { /* local */ }
         return buildVCard(contact);
     }
 
-    async function saveContactToDevice(contact) {
-        const vcardContent = await vcardForContact(contact);
-        const filename = `${(contact.name || 'contact').replace(/[^\w.-]+/g, '_')}.vcf`;
-        const blob = new Blob([vcardContent], { type: 'text/vcard' });
-        const file = new File([blob], filename, { type: 'text/vcard' });
+    function isAndroidDeviceUa() {
+        return /Android/i.test(navigator.userAgent || '');
+    }
+
+    function isIosDeviceUa() {
+        return /iPhone|iPad|iPod/i.test(navigator.userAgent || '')
+            || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    }
+
+    function androidInsertContactIntent(contact) {
+        // Chrome Android intent format (must use intent://host/#Intent;...;end)
+        // See: https://developer.chrome.com/docs/android/intents
+        const extras = [];
+        const add = (key, value) => {
+            const text = String(value || '').trim();
+            if (!text) return;
+            extras.push(`S.${key}=${encodeURIComponent(text)}`);
+        };
+        add('name', contact.name);
+        add('phone', firstPhoneNumber(contact.phone) || phoneNumbers(contact.phone)[0] || '');
+        add('email', contact.email);
+        add('company', contact.company);
+        add('job_title', contact.title);
+        add('postal', contact.address);
+
+        const extraStr = extras.length ? `${extras.join(';')};` : '';
+        return [
+            // Preferred: RawContacts insert (opens native Add Contact form)
+            `intent://vnd.android.cursor.dir/raw_contact/#Intent;action=android.intent.action.INSERT;${extraStr}end`,
+            // Fallback MIME host
+            `intent://vnd.android.cursor.dir/contact/#Intent;action=android.intent.action.INSERT;type=vnd.android.cursor.dir/contact;${extraStr}end`,
+        ];
+    }
+
+    function rememberPhoneSaveReturn(contact) {
         try {
-            if (navigator.share && (!navigator.canShare || navigator.canShare({ files: [file] }))) {
-                await navigator.share({
-                    files: [file],
-                    title: contact.name || 'Contact',
-                    text: contactShareText(contact),
-                });
-                return 'shared';
+            const cardId = contact?.cardId || phoneSaveSourceContact?.cardId || activeDetailContact?.cardId;
+            if (!cardId) return;
+            sessionStorage.setItem('folio_phone_save_return', JSON.stringify({
+                cardId,
+                at: Date.now(),
+            }));
+        } catch (e) { /* ignore */ }
+    }
+
+    function peekPhoneSaveReturn() {
+        try {
+            const raw = sessionStorage.getItem('folio_phone_save_return');
+            if (!raw) return null;
+            const data = JSON.parse(raw);
+            if (!data?.cardId || Date.now() - (data.at || 0) > 30 * 60 * 1000) {
+                sessionStorage.removeItem('folio_phone_save_return');
+                return null;
             }
-        } catch (err) {
-            if (err && err.name === 'AbortError') return 'aborted';
+            return data;
+        } catch (e) {
+            return null;
         }
+    }
+
+    function clearPhoneSaveReturn() {
+        try { sessionStorage.removeItem('folio_phone_save_return'); } catch (e) { /* ignore */ }
+    }
+
+    async function restoreContactAfterPhoneSave() {
+        const data = peekPhoneSaveReturn();
+        if (!data?.cardId) return false;
+        clearPhoneSaveReturn();
+        closeSaveToPhoneModal();
+        try {
+            if (typeof switchToTab === 'function') await switchToTab('contacts');
+        } catch (e) { /* ignore */ }
+        const contact = contactsData.find((c) => c.cardId === data.cardId);
+        if (contact) {
+            openContactDetail(contact);
+            return true;
+        }
+        return false;
+    }
+
+    function launchAndroidUrl(url) {
+        // Use a hidden iframe so Chrome does NOT navigate this tab away from the card page.
+        const iframe = document.createElement('iframe');
+        iframe.setAttribute('aria-hidden', 'true');
+        iframe.tabIndex = -1;
+        iframe.style.cssText = 'position:fixed;width:0;height:0;opacity:0;pointer-events:none;border:0;left:0;top:0;';
+        document.body.appendChild(iframe);
+        try {
+            iframe.src = url;
+        } catch (err) {
+            console.warn('iframe intent failed', err);
+        }
+        setTimeout(() => {
+            try { iframe.remove(); } catch (e) { /* ignore */ }
+        }, 2500);
+
+        // Also poke via a link that does not replace this document (no target=_self navigation).
+        try {
+            const link = document.createElement('a');
+            link.href = url;
+            link.rel = 'noopener';
+            link.target = '_blank';
+            link.style.display = 'none';
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+        } catch (err) {
+            console.warn('anchor intent failed', err);
+        }
+    }
+
+    async function openVCardInContactsApp(vcardContent, filename) {
+        const blob = new Blob([vcardContent], { type: 'text/vcard;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+
+        // Android: never navigate this tab — share sheet keeps you on the card page.
+        if (isAndroidDeviceUa() || !isIosDeviceUa()) {
+            try {
+                const file = new File([blob], filename, { type: 'text/vcard' });
+                if (navigator.share && (!navigator.canShare || navigator.canShare({ files: [file] }))) {
+                    await navigator.share({
+                        files: [file],
+                        title: filename.replace(/\.vcf$/i, '') || 'Contact',
+                        text: 'Save this contact',
+                    });
+                    URL.revokeObjectURL(url);
+                    return 'shared';
+                }
+            } catch (err) {
+                if (err && err.name === 'AbortError') {
+                    URL.revokeObjectURL(url);
+                    return 'aborted';
+                }
+            }
+            URL.revokeObjectURL(url);
+            return 'failed';
+        }
+
+        // iOS: opening the vCard leaves the page — remember card so we can restore on return.
+        rememberPhoneSaveReturn(activeDetailContact || phoneSaveSourceContact);
+        ignoreDetailPopUntil = Date.now() + 8000;
+        window.location.href = url;
+        setTimeout(() => URL.revokeObjectURL(url), 20000);
+        return 'opened';
+    }
+
+    async function saveContactToDevice(contact) {
+        const filename = `${(contact.name || 'contact').replace(/[^\w.-]+/g, '_') || 'contact'}.vcf`;
+        const vcardContent = buildVCard(contact);
+
+        rememberPhoneSaveReturn(contact);
+        ignoreDetailPopUntil = Date.now() + 8000;
+
+        // Android: fire Chrome intent without navigating away from card detail.
+        if (isAndroidDeviceUa()) {
+            const intents = androidInsertContactIntent(contact);
+            try {
+                launchAndroidUrl(intents[0]);
+                return 'opened';
+            } catch (err) {
+                console.warn('Android insert intent failed', err);
+                try {
+                    launchAndroidUrl(intents[1]);
+                    return 'opened';
+                } catch (err2) {
+                    console.warn('Android fallback intent failed', err2);
+                }
+                return openVCardInContactsApp(vcardContent, filename);
+            }
+        }
+
+        if (isIosDeviceUa()) {
+            return openVCardInContactsApp(vcardContent, filename);
+        }
+
+        const blob = new Blob([vcardContent], { type: 'text/vcard;charset=utf-8' });
         downloadBlob(blob, filename);
+        clearPhoneSaveReturn();
         return 'downloaded';
+    }
+
+    async function shareContactToAndroidContacts(contact) {
+        const filename = `${(contact.name || 'contact').replace(/[^\w.-]+/g, '_') || 'contact'}.vcf`;
+        rememberPhoneSaveReturn(contact);
+        ignoreDetailPopUntil = Date.now() + 8000;
+        return openVCardInContactsApp(buildVCard(contact), filename);
+    }
+
+    function openSaveToPhoneModal(contact) {
+        phoneSaveSourceContact = contact;
+        const modal = document.getElementById('saveToPhoneModal');
+        if (!modal) return;
+
+        // Keep the card detail page open underneath — never dismiss it for this sheet.
+        if (contact?.cardId) {
+            activeDetailContact = contact;
+            const view = document.getElementById('contactDetailView');
+            if (view?.classList.contains('hidden')) {
+                openContactDetail(contact);
+            } else {
+                document.body.classList.add('contact-detail-open');
+                view?.setAttribute('aria-hidden', 'false');
+            }
+        }
+
+        document.getElementById('savePhoneName').value = contact.name || '';
+        document.getElementById('savePhoneNumber').value = phoneNumbers(contact.phone)[0] || contact.phone || '';
+        document.getElementById('savePhoneEmail').value = contact.email || '';
+        document.getElementById('savePhoneTitle').value = contact.title || '';
+        document.getElementById('savePhoneCompany').value = contact.company || '';
+        document.getElementById('savePhoneAddress').value = contact.address || '';
+        const hint = document.getElementById('saveToPhoneHint');
+        const fallbackBtn = document.getElementById('saveToPhoneShareFallback');
+        if (fallbackBtn) {
+            fallbackBtn.classList.toggle('hidden', !(isAndroidDeviceUa() || isIosDeviceUa()));
+        }
+        if (hint) {
+            hint.textContent = isAndroidDeviceUa()
+                ? 'Opens Android Add Contact with these details. If nothing opens, use “Share to Contacts” and pick Contacts.'
+                : isIosDeviceUa()
+                    ? 'This opens Add Contact on your iPhone with these details filled in.'
+                    : 'On desktop this downloads a contact file you can import.';
+        }
+        modal.classList.remove('hidden');
+        document.body.classList.add('save-to-phone-open');
+        document.body.style.overflow = 'hidden';
+        // Delay focus so iOS doesn’t scroll the collection page underneath.
+        window.setTimeout(() => {
+            document.getElementById('savePhoneName')?.focus({ preventScroll: true });
+        }, 50);
+    }
+
+    function closeSaveToPhoneModal() {
+        document.getElementById('saveToPhoneModal')?.classList.add('hidden');
+        phoneSaveSourceContact = null;
+        document.body.classList.remove('save-to-phone-open');
+        // Keep overflow locked if card detail is still open.
+        if (document.body.classList.contains('contact-detail-open')) {
+            document.body.style.overflow = 'hidden';
+        } else {
+            document.body.style.overflow = '';
+        }
+    }
+
+    function readSaveToPhoneDraft() {
+        return {
+            ...(phoneSaveSourceContact || {}),
+            name: document.getElementById('savePhoneName')?.value.trim() || '',
+            phone: document.getElementById('savePhoneNumber')?.value.trim() || '',
+            email: document.getElementById('savePhoneEmail')?.value.trim() || '',
+            title: document.getElementById('savePhoneTitle')?.value.trim() || '',
+            company: document.getElementById('savePhoneCompany')?.value.trim() || '',
+            address: document.getElementById('savePhoneAddress')?.value.trim() || '',
+            _phoneSaveDraft: true,
+        };
     }
 
     function renderDetailSections(contact) {
@@ -1482,16 +1768,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const quick = document.getElementById('contactDetailQuick');
         quick.innerHTML = `
-            <button type="button" class="btn-luxury" id="contactDetailSave"><span>Save Contact</span></button>
+            <button type="button" class="btn-luxury" id="contactDetailSave"><span>Save to Phone</span></button>
             <button type="button" class="chip-btn" id="contactDetailShare">Share Connection</button>
             <button type="button" class="chip-btn" id="contactDetailEditBtn">Edit</button>
         `;
         document.getElementById('contactDetailFields').innerHTML = renderDetailSections(contact);
 
-        quick.querySelector('#contactDetailSave')?.addEventListener('click', async () => {
-            const result = await saveContactToDevice(contact);
-            if (result === 'shared') showToast('Contact opened for saving', 'success');
-            else if (result === 'downloaded') showToast('Contact file downloaded — open it to save', 'success');
+        quick.querySelector('#contactDetailSave')?.addEventListener('click', () => {
+            openSaveToPhoneModal(contact);
         });
         quick.querySelector('#contactDetailShare')?.addEventListener('click', async () => {
             const result = await shareVCardContent(await vcardForContact(contact), contact);
@@ -1508,6 +1792,49 @@ document.addEventListener('DOMContentLoaded', () => {
             history.pushState({ folioCard: contact.cardId }, '');
         }
     }
+
+    document.getElementById('closeSaveToPhoneModal')?.addEventListener('click', closeSaveToPhoneModal);
+    document.getElementById('saveToPhoneModal')?.addEventListener('click', (e) => {
+        if (e.target?.id === 'saveToPhoneModal') closeSaveToPhoneModal();
+    });
+    document.getElementById('saveToPhoneForm')?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const draft = readSaveToPhoneDraft();
+        if (!draft.name && !draft.phone && !draft.email) {
+            showToast('Add at least a name, phone, or email', 'error');
+            return;
+        }
+        const result = await saveContactToDevice(draft);
+        if (result === 'aborted') return;
+        // Stay on this card page — only close the edit sheet, never jump to home/scan.
+        closeSaveToPhoneModal();
+        if (activeDetailContact || phoneSaveSourceContact) {
+            const stay = activeDetailContact || phoneSaveSourceContact;
+            // Re-assert detail view in case Android/history tried to dismiss it.
+            if (document.getElementById('contactDetailView')?.classList.contains('hidden') && stay?.cardId) {
+                const fresh = contactsData.find((c) => c.cardId === stay.cardId) || stay;
+                openContactDetail(fresh);
+            }
+        }
+        if (result === 'opened') showToast('Opening Add Contact… Stay on this card when you come back', 'success');
+        else if (result === 'shared') showToast('Pick Contacts to finish saving', 'success');
+        else if (result === 'downloaded') showToast('Contact file downloaded — open it to save', 'success');
+        else if (result === 'failed') showToast('Could not open Contacts — try Share to Contacts', 'error');
+    });
+
+    document.getElementById('saveToPhoneShareFallback')?.addEventListener('click', async () => {
+        const draft = readSaveToPhoneDraft();
+        if (!draft.name && !draft.phone && !draft.email) {
+            showToast('Add at least a name, phone, or email', 'error');
+            return;
+        }
+        const result = await shareContactToAndroidContacts(draft);
+        if (result === 'aborted') return;
+        closeSaveToPhoneModal();
+        if (result === 'shared') showToast('Pick Contacts (or Files → Open) to save', 'success');
+        else if (result === 'opened') showToast('Opening contact file…', 'success');
+        else showToast('Could not share contact', 'error');
+    });
 
     document.getElementById('contactDetailBack')?.addEventListener('click', () => closeContactDetail());
     document.getElementById('contactDetailEdit')?.addEventListener('click', () => {
@@ -1638,9 +1965,26 @@ document.addEventListener('DOMContentLoaded', () => {
             closingDetailFromPop = false;
             return;
         }
+        // Returning from Android Contacts / intent must not kick you to the home/scan page.
+        if (Date.now() < ignoreDetailPopUntil && activeDetailContact) {
+            history.pushState({ folioCard: activeDetailContact.cardId }, '');
+            return;
+        }
         if (!document.getElementById('contactDetailView')?.classList.contains('hidden')) {
             closeContactDetail(true);
         }
+    });
+
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState !== 'visible') return;
+        if (!peekPhoneSaveReturn()) return;
+        // Keep user on the same card after leaving the Contacts app.
+        restoreContactAfterPhoneSave().catch(() => {});
+    });
+
+    window.addEventListener('pageshow', () => {
+        if (!peekPhoneSaveReturn()) return;
+        restoreContactAfterPhoneSave().catch(() => {});
     });
 
     // Reset Uploads
@@ -2031,6 +2375,27 @@ document.addEventListener('DOMContentLoaded', () => {
         return tidyAddress(chunk.join(', '));
     }
 
+    function stripSideLabelPrefix(value) {
+        let text = String(value || '').replace(/\s+/g, ' ').trim().replace(/^[\s\-:|]+|[\s\-:|]+$/g, '');
+        if (!text) return '';
+        if (/^(?:FRONT|BACK|FRONT\s+AND\s+BACK(?:\s+OF\s+THE\s+SAME\s+BUSINESS\s+CARD)?)\s*[:\-–—]?\s*$/i.test(text)) {
+            return '';
+        }
+        text = text.replace(
+            /^(?:FRONT|BACK)(?:\s+AND\s+BACK)?(?:\s+OF\s+THE\s+SAME\s+BUSINESS\s+CARD)?\s*[:\-–—]?\s*/i,
+            ''
+        ).trim().replace(/^[\s\-:|]+|[\s\-:|]+$/g, '');
+        return text;
+    }
+
+    function scrubSideLabelsFromContact(contact) {
+        if (!contact) return contact;
+        ['name', 'company', 'department', 'title', 'jobTitle'].forEach((key) => {
+            if (contact[key]) contact[key] = stripSideLabelPrefix(contact[key]);
+        });
+        return contact;
+    }
+
     function parseCardTextLocally(rawText) {
         const text = (rawText || '').trim();
         const data = {
@@ -2056,7 +2421,7 @@ document.addEventListener('DOMContentLoaded', () => {
             ...phones.map((phone) => phone.toLowerCase()),
             ...phones.map((phone) => phone.replace(/\s/g, '')),
         ]);
-        const leftover = text.split(/\n/).map((line) => line.replace(/\s+/g, ' ').trim()).filter((line) => (
+        const leftover = text.split(/\n/).map((line) => stripSideLabelPrefix(line)).filter((line) => (
             line
             && !skip.has(line.toLowerCase())
             && !line.includes('@')
@@ -2076,11 +2441,12 @@ document.addEventListener('DOMContentLoaded', () => {
         const titleLine = leftover.find((line) => line !== data.name && line !== data.company);
         if (titleLine) data.title = titleLine.slice(0, 80);
         data.address = extractAddress(leftover);
-        return data;
+        return scrubSideLabelsFromContact(data);
     }
 
     function repairContactFromOcr(contact, rawText) {
         if (!contact) return contact;
+        scrubSideLabelsFromContact(contact);
         const parsed = parseCardTextLocally(rawText);
         const apiHasBadCode = /\+01\b/.test(contact.phone || '') || /(?:^|[^\d])01\s*\d{5}/.test(contact.phone || '');
         if (parsed.phone && (apiHasBadCode || !contact.phone)) {
@@ -2096,7 +2462,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if (!contact.company && parsed.company) contact.company = parsed.company;
         if (!contact.email && parsed.email) contact.email = parsed.email;
-        return contact;
+        if (contact.name && /^front\b/i.test(contact.name)) {
+            contact.name = stripSideLabelPrefix(contact.name) || parsed.name || contact.name;
+        }
+        return scrubSideLabelsFromContact(contact);
     }
 
     function contactLooksEmpty(contact) {
@@ -2521,135 +2890,152 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Track if contacts are currently being loaded
-    let isLoadingContacts = false;
+    async function hydrateContactsFromCache() {
+        const cached = await loadCachedContactsSnapshot();
+        if (!cached?.length) return false;
+        contactsData = cached
+            .filter((c) => c && c.cardId !== '__PROFILE__' && c.kind !== 'profile' && c.kind !== 'slug-alias')
+            .map((c) => {
+                const contact = normalizeSavedCard({ ...c });
+                applySyncedImagePointers(contact);
+                const thumb = localStorage.getItem(`thumbnail_v2_${contact.cardId}`);
+                if (thumb) contact.cachedImageUrl = thumb;
+                return contact;
+            });
+        updateTagFilterOptions();
+        updateFollowUpHint();
+        filterAndSortContacts();
+        return contactsData.length > 0;
+    }
+
+    async function enrichContactMedia(contact) {
+        normalizeSavedCard(contact);
+        applySyncedImagePointers(contact);
+        try {
+            const needsFrontFetch = contact.hasImage
+                || (contact.imageUrl && String(contact.imageUrl).startsWith('db:'))
+                || (contact.originalImageUrl && String(contact.originalImageUrl).includes('/images/'));
+            const needsBackFetch = contact.hasBackImage
+                || (contact.backImageUrl && String(contact.backImageUrl).startsWith('db:'))
+                || (contact.originalBackImageUrl && String(contact.originalBackImageUrl).includes('/images/'));
+
+            if (needsFrontFetch && (!contact.originalImageUrl || !String(contact.originalImageUrl).startsWith('data:'))) {
+                contact.originalImageUrl = syncedImageUrl(contact.cardId, 'front');
+            }
+            if (needsBackFetch && (!contact.originalBackImageUrl || !String(contact.originalBackImageUrl).startsWith('data:'))) {
+                contact.originalBackImageUrl = syncedImageUrl(contact.cardId, 'back');
+            }
+
+            const cachedThumbnail = localStorage.getItem(`thumbnail_v2_${contact.cardId}`);
+            if (cachedThumbnail) {
+                contact.cachedImageUrl = cachedThumbnail;
+            } else if (contact.originalImageUrl && contact.originalImageUrl.startsWith('data:')) {
+                const thumbnailDataUrl = await createThumbnail(contact.originalImageUrl, 720, 420, 0.82);
+                try {
+                    localStorage.setItem(`thumbnail_v2_${contact.cardId}`, thumbnailDataUrl);
+                } catch (e) {
+                    console.warn('Could not cache thumbnail in localStorage:', e);
+                }
+                contact.cachedImageUrl = thumbnailDataUrl;
+            } else if (needsFrontFetch) {
+                try {
+                    const imageDataUrl = await fetchContactImageDataUrl(contact.cardId, 'front');
+                    contact.originalImageUrl = imageDataUrl;
+                    contact.frontImage = imageDataUrl;
+                    await recropStoredContact(contact);
+                    const thumbnailDataUrl = await createThumbnail(contact.originalImageUrl, 720, 420, 0.82);
+                    try {
+                        localStorage.setItem(`thumbnail_v2_${contact.cardId}`, thumbnailDataUrl);
+                    } catch (e) {
+                        console.warn('Could not cache thumbnail in localStorage:', e);
+                    }
+                    contact.cachedImageUrl = thumbnailDataUrl;
+                } catch (imgErr) {
+                    console.warn(`Could not fetch synced image for ${contact.cardId}:`, imgErr);
+                    contact.cachedImageUrl = contact.originalImageUrl || '';
+                }
+            }
+
+            if (needsBackFetch && (!contact.originalBackImageUrl || String(contact.originalBackImageUrl).includes('/images/'))) {
+                try {
+                    contact.originalBackImageUrl = await fetchContactImageDataUrl(contact.cardId, 'back');
+                    contact.backImage = contact.originalBackImageUrl;
+                } catch (backErr) {
+                    console.warn(`Could not fetch back image for ${contact.cardId}:`, backErr);
+                }
+            }
+
+            await recropStoredContact(contact);
+            normalizeSavedCard(contact);
+        } catch (error) {
+            console.warn(`Error creating thumbnail for contact ${contact.cardId}:`, error);
+            contact.cachedImageUrl = contact.originalImageUrl || contact.frontImage;
+        }
+    }
 
     async function loadContacts() {
-                    if (!userId) {
+        if (!userId) {
             console.error('No userId available');
             return;
         }
 
-        // Prevent duplicate API calls if already loading
-        if (isLoadingContacts) {
+        if (loadContactsPromise) {
             console.log('Already loading contacts, skipping duplicate call');
-            return;
+            return loadContactsPromise;
         }
 
         isLoadingContacts = true;
+        showContactsLoading(
+            'Restoring your cards…',
+            'Fetching saved contacts from your account.'
+        );
 
-        try {
-            const response = await fetch(`${API_URL}/contacts?userId=${encodeURIComponent(userId)}`, {
-                headers: authHeaders(),
-            });
-            if (!response.ok) {
-                throw new Error('Failed to load contacts');
-            }
-
-            const data = await response.json();
-            console.log('Loaded contacts data:', data);
-            
-            // Handle both formats: direct array or {contacts: [...]} object
-            if (Array.isArray(data)) {
-                contactsData = data;
-            } else if (data.contacts && Array.isArray(data.contacts)) {
-                contactsData = data.contacts;
-            } else {
-                console.error('Invalid contacts data format:', data);
-                showToast('Error loading contacts: Invalid data format', 'error');
-                return;
-            }
-            contactsData = contactsData.filter((c) => c && c.cardId !== '__PROFILE__' && c.kind !== 'profile' && c.kind !== 'slug-alias');
-            // Server is source of truth when online — do not overwrite an empty account
-            // with another device's/browser's IndexedDB cache.
-
-            await cacheContactsSnapshot(contactsData);
-            updateTagFilterOptions();
-            updateFollowUpHint();
-            
-            // Cache image URLs and create thumbnails for all contacts
-            for (const contact of contactsData) {
-                normalizeSavedCard(contact);
-                applySyncedImagePointers(contact);
-                try {
-                    const needsFrontFetch = contact.hasImage
-                        || (contact.imageUrl && String(contact.imageUrl).startsWith('db:'))
-                        || (contact.originalImageUrl && String(contact.originalImageUrl).includes('/images/'));
-                    const needsBackFetch = contact.hasBackImage
-                        || (contact.backImageUrl && String(contact.backImageUrl).startsWith('db:'))
-                        || (contact.originalBackImageUrl && String(contact.originalBackImageUrl).includes('/images/'));
-
-                    if (needsFrontFetch && (!contact.originalImageUrl || !String(contact.originalImageUrl).startsWith('data:'))) {
-                        contact.originalImageUrl = syncedImageUrl(contact.cardId, 'front');
-                    }
-                    if (needsBackFetch && (!contact.originalBackImageUrl || !String(contact.originalBackImageUrl).startsWith('data:'))) {
-                        contact.originalBackImageUrl = syncedImageUrl(contact.cardId, 'back');
-                    }
-
-                    const cachedThumbnail = localStorage.getItem(`thumbnail_v2_${contact.cardId}`);
-                    if (cachedThumbnail) {
-                        contact.cachedImageUrl = cachedThumbnail;
-                    } else if (contact.originalImageUrl && contact.originalImageUrl.startsWith('data:')) {
-                        const thumbnailDataUrl = await createThumbnail(contact.originalImageUrl, 720, 420, 0.82);
-                        try {
-                            localStorage.setItem(`thumbnail_v2_${contact.cardId}`, thumbnailDataUrl);
-                        } catch (e) {
-                            console.warn('Could not cache thumbnail in localStorage:', e);
-                        }
-                        contact.cachedImageUrl = thumbnailDataUrl;
-                    } else if (needsFrontFetch) {
-                        try {
-                            const imageDataUrl = await fetchContactImageDataUrl(contact.cardId, 'front');
-                            contact.originalImageUrl = imageDataUrl;
-                            contact.frontImage = imageDataUrl;
-                            await recropStoredContact(contact);
-                            const thumbnailDataUrl = await createThumbnail(contact.originalImageUrl, 720, 420, 0.82);
-                            try {
-                                localStorage.setItem(`thumbnail_v2_${contact.cardId}`, thumbnailDataUrl);
-                            } catch (e) {
-                                console.warn('Could not cache thumbnail in localStorage:', e);
-                            }
-                            contact.cachedImageUrl = thumbnailDataUrl;
-                        } catch (imgErr) {
-                            console.warn(`Could not fetch synced image for ${contact.cardId}:`, imgErr);
-                            contact.cachedImageUrl = contact.originalImageUrl || '';
-                        }
-                    }
-
-                    if (needsBackFetch && (!contact.originalBackImageUrl || String(contact.originalBackImageUrl).includes('/images/'))) {
-                        try {
-                            contact.originalBackImageUrl = await fetchContactImageDataUrl(contact.cardId, 'back');
-                            contact.backImage = contact.originalBackImageUrl;
-                        } catch (backErr) {
-                            console.warn(`Could not fetch back image for ${contact.cardId}:`, backErr);
-                        }
-                    }
-
-                    await recropStoredContact(contact);
-                    normalizeSavedCard(contact);
-                } catch (error) {
-                    console.warn(`Error creating thumbnail for contact ${contact.cardId}:`, error);
-                    contact.cachedImageUrl = contact.originalImageUrl || contact.frontImage;
+        loadContactsPromise = (async () => {
+            try {
+                // Instant paint from device cache while the network request runs.
+                const hadCache = await hydrateContactsFromCache();
+                if (hadCache) {
+                    showContactsLoading(
+                        'Syncing your cards…',
+                        'Updating from your account — almost there.'
+                    );
+                    // Keep list visible under a soft sync state: hide full-page empty loader
+                    // once we already have cached cards to show.
+                    if (contactsData.length > 0) hideContactsLoading();
                 }
-            }
-            await cacheContactsSnapshot(contactsData);
-            
-            // Apply current search and sort filters to the locally stored data
-            filterAndSortContacts();
-            
-            // Update network visualization with new data
-            updateNetworkVisualization();
-            
-            // Update analytics with new data
-            updateNetworkAnalytics();
-        } catch (error) {
-            console.error('Error loading contacts:', error);
-            const cached = await loadCachedContactsSnapshot();
-            if (cached && cached.length) {
-                contactsData = cached;
+
+                const response = await fetch(`${API_URL}/contacts?userId=${encodeURIComponent(userId)}`, {
+                    headers: authHeaders(),
+                    credentials: 'include',
+                });
+                if (!response.ok) {
+                    throw new Error('Failed to load contacts');
+                }
+
+                const data = await response.json();
+                console.log('Loaded contacts data:', data);
+
+                if (Array.isArray(data)) {
+                    contactsData = data;
+                } else if (data.contacts && Array.isArray(data.contacts)) {
+                    contactsData = data.contacts;
+                } else {
+                    console.error('Invalid contacts data format:', data);
+                    showToast('Error loading contacts: Invalid data format', 'error');
+                    return;
+                }
+                contactsData = contactsData.filter((c) => c && c.cardId !== '__PROFILE__' && c.kind !== 'profile' && c.kind !== 'slug-alias');
+
                 for (const contact of contactsData) {
                     normalizeSavedCard(contact);
-                    await recropStoredContact(contact);
+                    applySyncedImagePointers(contact);
+                    const thumb = localStorage.getItem(`thumbnail_v2_${contact.cardId}`);
+                    if (thumb) contact.cachedImageUrl = thumb;
                 }
+
+                // Paint the list immediately — don't wait on image downloads.
+                isLoadingContacts = false;
+                hideContactsLoading();
                 await cacheContactsSnapshot(contactsData);
                 updateTagFilterOptions();
                 updateFollowUpHint();
@@ -2658,15 +3044,56 @@ document.addEventListener('DOMContentLoaded', () => {
                     updateNetworkVisualization();
                     updateNetworkAnalytics();
                 } catch (vizErr) {
-                    console.warn('Offline viz update skipped:', vizErr);
+                    console.warn('Viz update deferred:', vizErr);
                 }
-                showToast('Offline — showing cached contacts', 'warning');
-            } else {
-                showToast('Failed to load contacts', 'error');
+
+                // Enrich images/thumbnails in the background, then refresh previews.
+                for (const contact of contactsData) {
+                    await enrichContactMedia(contact);
+                }
+                await cacheContactsSnapshot(contactsData);
+                filterAndSortContacts();
+                try {
+                    updateNetworkVisualization();
+                    updateNetworkAnalytics();
+                } catch (vizErr) {
+                    console.warn('Viz update skipped:', vizErr);
+                }
+            } catch (error) {
+                console.error('Error loading contacts:', error);
+                const cached = await loadCachedContactsSnapshot();
+                if (cached && cached.length) {
+                    contactsData = cached;
+                    for (const contact of contactsData) {
+                        normalizeSavedCard(contact);
+                        await recropStoredContact(contact);
+                    }
+                    await cacheContactsSnapshot(contactsData);
+                    updateTagFilterOptions();
+                    updateFollowUpHint();
+                    filterAndSortContacts();
+                    try {
+                        updateNetworkVisualization();
+                        updateNetworkAnalytics();
+                    } catch (vizErr) {
+                        console.warn('Offline viz update skipped:', vizErr);
+                    }
+                    showToast('Offline — showing cached contacts', 'warning');
+                } else {
+                    showToast('Failed to load contacts', 'error');
+                    filterAndSortContacts();
+                }
+            } finally {
+                isLoadingContacts = false;
+                hideContactsLoading();
+                if (contactsData.length === 0) {
+                    filterAndSortContacts();
+                }
+                loadContactsPromise = null;
             }
-        } finally {
-            isLoadingContacts = false;
-        }
+        })();
+
+        return loadContactsPromise;
     }
 
     // Global functions for contact management
@@ -4080,9 +4507,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     scanTab.classList.add('tab-active');
                     scanContent.classList.remove('hidden');
                     setBootStatus('Welcome back');
-                    loadContacts().catch((error) => {
-                        console.error('Error loading contacts during initialization:', error);
-                    });
+                    loadContacts()
+                        .then(() => restoreContactAfterPhoneSave())
+                        .catch((error) => {
+                            console.error('Error loading contacts during initialization:', error);
+                        });
                 } else {
                     setBootStatus('Ready to sign in');
                     showSignInModal();
