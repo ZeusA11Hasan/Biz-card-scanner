@@ -1155,10 +1155,10 @@ body.camera-live .recent-scans {
   position: absolute;
   top: 18px;
   right: 18px;
-  width: 56px;
+  width: 72px;
   z-index: 4;
   margin: 0;
-  animation: mascotBob 2.8s ease-in-out infinite;
+  animation: floaty 3.2s ease-in-out infinite;
   filter: drop-shadow(0 8px 14px rgba(0, 0, 0, 0.4));
   pointer-events: none;
 }
@@ -1544,7 +1544,7 @@ body.camera-live .recent-scans {
   }
 
   .camera-panel__mascot--live {
-    width: 40px;
+    width: 58px;
   }
 
   .camera-panel__idle-title {
@@ -3810,7 +3810,8 @@ body.card-photo-open {
 .chat-avatar__img {
   width: 34px;
   height: auto;
-  animation: chatAvatarBob 3s ease-in-out infinite;
+  object-fit: contain;
+  animation: none;
 }
 
 .chat-avatar__pulse {
@@ -3875,7 +3876,7 @@ body.card-photo-open {
 }
 
 .chat-welcome__mascot {
-  width: 108px;
+  width: min(168px, 52vw);
   height: auto;
   filter: drop-shadow(0 12px 18px rgba(0, 0, 0, 0.35));
   animation: floaty 3.6s ease-in-out infinite;
