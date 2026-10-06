@@ -65,18 +65,21 @@ body {
   isolation: isolate;
 }
 
-body::before {
-  content: "";
+.ambient {
   position: fixed;
   inset: 0;
   z-index: -2;
-  background:
-    radial-gradient(1100px 700px at 8% -12%, rgba(110, 160, 255, 0.55) 0%, transparent 58%),
-    radial-gradient(900px 620px at 96% 4%, rgba(210, 130, 255, 0.4) 0%, transparent 55%),
-    radial-gradient(820px 560px at 78% 92%, rgba(70, 230, 210, 0.28) 0%, transparent 58%),
-    radial-gradient(640px 420px at 14% 82%, rgba(255, 180, 120, 0.2) 0%, transparent 52%),
-    linear-gradient(165deg, #141a32 0%, #0a0c16 45%, #06070f 100%);
+  overflow: hidden;
+  background: #070910;
   pointer-events: none;
+}
+
+.ambient__video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 body::after {
@@ -84,9 +87,14 @@ body::after {
   position: fixed;
   inset: 0;
   z-index: -1;
-  background:
-    radial-gradient(circle at 50% 120%, rgba(255, 255, 255, 0.06), transparent 42%);
+  background: radial-gradient(ellipse at center, transparent 52%, rgba(5, 7, 12, 0.42) 100%);
   pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ambient__video {
+    display: none;
+  }
 }
 
 body.is-standalone .app-header {
@@ -265,6 +273,7 @@ body.camera-flashing .app-stage {
   position: relative;
   display: flex;
   flex-direction: column;
+  gap: 10px;
   /* Fill remaining stage space without forcing page scroll */
   min-height: 0;
   height: calc(
@@ -352,6 +361,7 @@ body.camera-flashing .app-stage {
 
 body.scan-processing .scan-layout,
 body.scan-processing .scan-utils,
+body.scan-processing .recent-scans,
 body.scan-processing #thumbnailGallery,
 body.scan-processing #scanCompleteMessage {
   display: none !important;
@@ -378,7 +388,7 @@ body.scan-processing #scanCompleteMessage {
 
 .hero--scan {
   display: block;
-  margin-bottom: 12px;
+  margin-bottom: 6px;
   min-height: 0;
   flex-shrink: 0;
 }
@@ -494,21 +504,13 @@ body.scan-processing #scanCompleteMessage {
 /* —— Full realtime camera (primary scan UI) —— */
 .camera-panel {
   position: relative;
-  flex: 1 1 auto;
-  min-height: 0;
-  /* Cap so hero + header + nav stay on one screen */
-  max-height: calc(
-    100dvh
-    - env(safe-area-inset-top, 0px)
-    - 52px
-    - 78px
-    - var(--nav-h)
-    - env(safe-area-inset-bottom, 0px)
-    - 16px
-  );
-  height: auto;
-  margin: 0 0 4px;
-  border-radius: 28px;
+  flex: 0 0 auto;
+  /* Compact home capture — leaves room for recent cards */
+  height: min(34dvh, 248px);
+  min-height: 188px;
+  max-height: min(34dvh, 248px);
+  margin: 0;
+  border-radius: 24px;
   overflow: hidden;
   background:
     linear-gradient(165deg, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0.03) 100%),
@@ -522,8 +524,10 @@ body.scan-processing #scanCompleteMessage {
 }
 
 .camera-panel.is-live {
+  flex: 1 1 auto;
   background: #0b1018;
   cursor: default;
+  height: auto;
   min-height: min(62dvh, 640px);
   max-height: calc(
     100dvh
@@ -536,8 +540,179 @@ body.scan-processing #scanCompleteMessage {
 }
 
 body.camera-live .hero--scan,
-body.camera-live .scan-desktop-actions {
+body.camera-live .scan-desktop-actions,
+body.camera-live .recent-scans {
   display: none;
+}
+
+/* Recent scans on home */
+.recent-scans {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 2px;
+  padding-bottom: 2px;
+}
+
+.recent-scans.hidden {
+  display: none !important;
+}
+
+.recent-scans__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-shrink: 0;
+  padding: 0 2px;
+}
+
+.recent-scans__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+
+.recent-scans__all {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  padding: 0;
+  cursor: pointer;
+}
+
+.recent-scans__all:active {
+  opacity: 0.7;
+}
+
+.recent-scans__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.recent-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: linear-gradient(
+    165deg,
+    rgba(255, 255, 255, 0.14) 0%,
+    rgba(255, 255, 255, 0.05) 100%
+  );
+  border: 1px solid var(--glass-edge-soft);
+  border-radius: 18px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 10px 24px rgba(0, 0, 0, 0.2);
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  overflow: hidden;
+  cursor: pointer;
+  text-align: left;
+  color: inherit;
+  padding: 0;
+  font: inherit;
+  transition: transform 0.18s ease, border-color 0.18s ease;
+  animation: recentCardIn 0.45s ease both;
+}
+
+.recent-card:nth-child(2) {
+  animation-delay: 0.06s;
+}
+
+.recent-card:active {
+  transform: scale(0.985);
+}
+
+@keyframes recentCardIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .recent-card {
+    animation: none;
+  }
+}
+
+.recent-card__preview {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 72px;
+  padding: 8px 8px 0;
+  overflow: hidden;
+}
+
+.recent-card__preview img,
+.recent-card__fallback {
+  width: 100%;
+  height: 100%;
+  min-height: 72px;
+  max-height: 108px;
+  aspect-ratio: 1.7 / 1;
+  object-fit: cover;
+  object-position: center;
+  display: block;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.2);
+}
+
+.recent-card__fallback {
+  display: grid;
+  place-items: center;
+  color: rgba(255, 255, 255, 0.45);
+  font-family: var(--font-display);
+  font-size: 1.2rem;
+  font-weight: 700;
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.03));
+}
+
+.recent-card__body {
+  padding: 10px 12px 12px;
+  min-width: 0;
+}
+
+.recent-card__name {
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1.25;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.recent-card__when {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .camera-panel.is-dragover {
@@ -617,7 +792,7 @@ body.camera-live .scan-desktop-actions {
   justify-content: center;
   width: 100%;
   height: 100%;
-  padding: 12px 14px 56px;
+  padding: 10px 14px 20px;
   gap: 2px;
   overflow: hidden;
 }
@@ -1119,17 +1294,29 @@ body.camera-live .scan-desktop-actions {
   }
 
   .camera-panel {
-    min-height: 0;
+    height: min(32dvh, 220px);
+    min-height: 168px;
+    max-height: min(32dvh, 220px);
+    border-radius: 22px;
+  }
+
+  .camera-panel.is-live {
+    height: auto;
+    min-height: min(58dvh, 560px);
     max-height: calc(
       100dvh
       - env(safe-area-inset-top, 0px)
       - 52px
-      - 100px
       - var(--nav-h)
       - env(safe-area-inset-bottom, 0px)
-      - 20px
+      - 12px
     );
-    border-radius: 22px;
+  }
+
+  .recent-card__preview img,
+  .recent-card__fallback {
+    max-height: 92px;
+    min-height: 64px;
   }
 
   .camera-panel__scene {
@@ -1744,7 +1931,10 @@ body.camera-live .scan-desktop-actions {
 }
 
 #contactsList {
-  display: block;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding-bottom: 24px;
 }
 
 .contact-list {
@@ -1801,8 +1991,10 @@ body.camera-live .scan-desktop-actions {
 }
 
 #contactsList img {
+  width: 100%;
   max-width: 100%;
-  max-height: 96px;
+  max-height: none;
+  height: auto;
 }
 
 .saved-list {
@@ -1839,30 +2031,56 @@ body.camera-live .scan-desktop-actions {
   position: relative;
   width: 100%;
   max-width: 100%;
-  display: grid;
-  place-items: center;
-  min-height: 92px;
-  max-height: 112px;
+  display: block;
+  min-height: 0;
+  max-height: none;
   overflow: hidden;
-  padding: 10px 10px 8px;
-  background: rgba(255, 255, 255, 0.04);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 8px 8px 0;
+  background: transparent;
+  border-bottom: none;
 }
 
 .saved-card__preview img,
 .saved-card__preview-fallback {
   position: static;
-  width: auto;
+  width: 100%;
   height: auto;
   max-width: 100%;
-  max-height: 96px;
-  object-fit: contain;
+  max-height: none;
+  aspect-ratio: 1.7 / 1;
+  object-fit: cover;
   object-position: center;
   display: block;
-  background: #fff;
-  border: 1px solid rgba(27, 42, 74, 0.12);
-  border-radius: 8px;
-  box-shadow: 0 4px 12px rgba(27, 42, 74, 0.1);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.22);
+  transition: opacity 0.25s ease;
+}
+
+.saved-card__preview.is-loading img,
+.flip-card__face.is-loading img {
+  opacity: 0;
+}
+
+.media-loader {
+  display: none;
+  width: 28px;
+  height: 28px;
+  border: 3px solid rgba(255, 255, 255, 0.22);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: contactsSpin 0.85s linear infinite;
+}
+
+.saved-card__preview.is-loading .media-loader,
+.flip-card__face.is-loading .media-loader {
+  display: block;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  margin: -14px 0 0 -14px;
+  z-index: 1;
 }
 
 .saved-card__preview-fallback {
@@ -1877,13 +2095,13 @@ body.camera-live .scan-desktop-actions {
 }
 
 .saved-card__body {
-  padding: 10px 10px 12px;
+  padding: 12px 16px 14px;
   background: transparent;
 }
 
 .saved-card__body h3 {
   margin: 0;
-  font-size: 0.92rem;
+  font-size: 0.8rem;
   font-weight: 700;
   line-height: 1.25;
   display: -webkit-box;
@@ -1981,9 +2199,9 @@ body.camera-live .scan-desktop-actions {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .contacts-loading__spinner {
+  .contacts-loading__spinner,
+  .media-loader {
     animation: none;
-    border-top-color: var(--ink, #1b2a4a);
   }
 }
 
@@ -2128,7 +2346,7 @@ body.card-photo-open {
   inset: 0;
   overflow: hidden;
   border-radius: 16px;
-  background: #ece7dc;
+  background: rgba(255, 255, 255, 0.08);
   box-shadow: var(--shadow-card);
   border: 1px solid rgba(27, 42, 74, 0.12);
   backface-visibility: hidden;
@@ -3143,6 +3361,16 @@ body.card-photo-open {
   margin: 0 0 4px;
 }
 
+.google-sign-in__slot {
+  display: flex;
+  justify-content: center;
+  min-height: 44px;
+}
+
+.google-sign-in__slot > div {
+  width: 100% !important;
+}
+
 .google-sign-in__btn {
   display: flex;
   align-items: center;
@@ -3908,6 +4136,27 @@ body.is-standalone #installAppBtn {
   .camera-panel {
     max-height: none;
     min-height: 0;
+    height: min(42dvh, 360px);
+  }
+
+  .camera-panel.is-live {
+    height: 100%;
+    min-height: min(520px, calc(100dvh - 140px));
+  }
+
+  .recent-scans {
+    flex: 0 0 auto;
+    margin-top: 8px;
+  }
+
+  .recent-scans__grid {
+    flex: 0 0 auto;
+  }
+
+  .recent-card__preview img,
+  .recent-card__fallback {
+    max-height: 140px;
+    min-height: 96px;
   }
 
   #contactsContent,
@@ -4167,7 +4416,7 @@ body.is-standalone #installAppBtn {
   }
 
   .scan-layout__capture {
-    min-height: min(520px, calc(100dvh - 140px));
+    min-height: min(360px, calc(100dvh - 220px));
   }
 
   .hero--scan {
@@ -4212,7 +4461,8 @@ body.is-standalone #installAppBtn {
 
   .camera-panel {
     height: 100%;
-    min-height: min(520px, calc(100dvh - 140px));
+    min-height: min(360px, calc(100dvh - 220px));
+    max-height: none;
     margin: 0;
     border-radius: 28px;
   }
@@ -4822,14 +5072,13 @@ body.is-public-card .app-stage {
 }
 
 @media (max-width: 420px) {
-  .saved-card__preview {
-    min-height: 84px;
-    max-height: 100px;
+  #contactsList,
+  .saved-list {
+    gap: 8px;
   }
 
-  .saved-card__preview img,
-  .saved-card__preview-fallback {
-    max-height: 84px;
+  .saved-card__body h3 {
+    font-size: 0.74rem;
   }
 }
 

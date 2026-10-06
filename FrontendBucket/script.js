@@ -376,7 +376,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const googleSignInWrap = document.getElementById('googleSignInWrap');
     const googleSignInBtn = document.getElementById('googleSignInBtn');
     let signInIsRegister = false;
-    let googleTokenClient = null;
     let googleSignInSetupPromise = null;
     const signOutBtn = document.getElementById('signOutBtn');
     const toast = document.getElementById('toast');
@@ -759,6 +758,7 @@ document.addEventListener('DOMContentLoaded', () => {
         window.userId = null;
         contactsData = [];
         signOutBtn?.classList.add('hidden');
+        updateRecentScans();
     }
 
     async function fetchAuthMe(useBearer) {
@@ -842,7 +842,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function loadGoogleIdentityScript() {
-        if (window.google?.accounts?.oauth2) return Promise.resolve();
+        if (window.google?.accounts?.id) return Promise.resolve();
         return new Promise((resolve, reject) => {
             const existing = document.querySelector('script[data-folio-gsi="1"]');
             if (existing) {
@@ -898,57 +898,40 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
             await loadGoogleIdentityScript();
-            if (!window.google?.accounts?.oauth2) {
+            if (!window.google?.accounts?.id) {
                 throw new Error('Google sign-in is unavailable');
             }
-            googleTokenClient = window.google.accounts.oauth2.initTokenClient({
+            googleSignInWrap.classList.remove('hidden');
+            const width = Math.max(240, Math.min(400, Math.round(googleSignInWrap.clientWidth || 320)));
+            window.google.accounts.id.initialize({
                 client_id: clientId,
-                scope: 'openid email profile',
+                auto_select: false,
+                cancel_on_tap_outside: true,
                 callback: async (tokenResponse) => {
-                    googleSignInBtn.disabled = false;
-                    if (tokenResponse.error) {
-                        hideAuthLoading();
-                        if (tokenResponse.error === 'popup_closed_by_user' || tokenResponse.error === 'access_denied') {
-                            return;
-                        }
+                    const credential = tokenResponse && tokenResponse.credential;
+                    if (!credential) {
                         showSignInError('Google sign-in failed');
                         return;
                     }
                     try {
-                        await completeGoogleSignIn({ accessToken: tokenResponse.access_token });
+                        await completeGoogleSignIn({ credential });
                     } catch (error) {
                         console.error('Google sign-in error', error);
                         hideAuthLoading();
                         showSignInError(error.message || 'Google sign-in failed');
                     }
                 },
-                error_callback: (error) => {
-                    googleSignInBtn.disabled = false;
-                    hideAuthLoading();
-                    const type = error?.type || error?.message || '';
-                    if (String(type).includes('popup_closed') || String(type).includes('popup_closed_by_user')) {
-                        return;
-                    }
-                    showSignInError('Google sign-in failed');
-                },
             });
-            if (!googleSignInBtn.dataset.bound) {
-                googleSignInBtn.dataset.bound = '1';
-                googleSignInBtn.addEventListener('click', () => {
-                    signInError?.classList.add('hidden');
-                    if (!googleTokenClient) {
-                        showSignInError('Google sign-in is not ready yet');
-                        return;
-                    }
-                    googleSignInBtn.disabled = true;
-                    showAuthLoading('Opening Google…', 'Choose your account, then we\'ll finish signing you in.');
-                    googleTokenClient.requestAccessToken({ prompt: 'select_account' });
-                    window.setTimeout(() => {
-                        googleSignInBtn.disabled = false;
-                    }, 8000);
-                });
-            }
-            googleSignInWrap.classList.remove('hidden');
+            googleSignInBtn.replaceChildren();
+            window.google.accounts.id.renderButton(googleSignInBtn, {
+                type: 'standard',
+                theme: 'outline',
+                size: 'large',
+                text: 'continue_with',
+                shape: 'pill',
+                width,
+                logo_alignment: 'center',
+            });
         })().catch((error) => {
             console.warn('Google sign-in unavailable', error);
             googleSignInSetupPromise = null;
@@ -1151,8 +1134,9 @@ document.addEventListener('DOMContentLoaded', () => {
     function filterAndSortContacts() {
         if (!contactsData || !Array.isArray(contactsData)) {
             console.error('No valid contacts data available for filtering/sorting');
-                return;
-            }
+            updateRecentScans();
+            return;
+        }
 
         const searchTerm = searchContacts.value.toLowerCase();
         const sortValue = sortContacts.value;
@@ -1222,6 +1206,7 @@ document.addEventListener('DOMContentLoaded', () => {
         
         // Update the UI with filtered and sorted contacts
         updateContactsList(filteredContacts);
+        updateRecentScans();
     }
 
     // Helper function to escape HTML special characters
@@ -1268,6 +1253,55 @@ document.addEventListener('DOMContentLoaded', () => {
         return `Saved ${new Date(iso).toLocaleDateString()}`;
     }
 
+    function updateRecentScans() {
+        const section = document.getElementById('recentScans');
+        const grid = document.getElementById('recentScansGrid');
+        if (!section || !grid) return;
+
+        const recent = [...(contactsData || [])]
+            .filter((c) => c && c.cardId)
+            .sort((a, b) => {
+                const ta = new Date(a.createdAt || a.dateAdded || 0).getTime() || 0;
+                const tb = new Date(b.createdAt || b.dateAdded || 0).getTime() || 0;
+                return tb - ta;
+            })
+            .slice(0, 2)
+            .map((raw) => normalizeSavedCard({ ...raw }));
+
+        if (recent.length === 0) {
+            section.classList.add('hidden');
+            grid.innerHTML = '';
+            return;
+        }
+
+        section.classList.remove('hidden');
+        grid.innerHTML = recent.map((contact) => {
+            const preview = cardPreviewSrc(contact);
+            const initial = (contact.name || contact.company || 'C').trim().charAt(0).toUpperCase();
+            const when = formatSavedAgo(contact.createdAt || contact.dateAdded) || 'Saved recently';
+            return `
+                <button type="button" class="recent-card" data-card-id="${escapeHtml(contact.cardId)}" aria-label="Open ${escapeHtml(contact.name || 'saved card')}">
+                    <div class="recent-card__preview">
+                        ${preview
+                            ? `<img src="${preview}" alt="" loading="lazy">`
+                            : `<div class="recent-card__fallback">${escapeHtml(initial)}</div>`}
+                    </div>
+                    <div class="recent-card__body">
+                        <p class="recent-card__name">${escapeHtml(contact.name || 'Unnamed contact')}</p>
+                        <p class="recent-card__when">${escapeHtml(when)}</p>
+                    </div>
+                </button>
+            `;
+        }).join('');
+
+        grid.querySelectorAll('.recent-card').forEach((card) => {
+            card.addEventListener('click', () => {
+                const contact = contactsData.find((c) => c.cardId === card.dataset.cardId);
+                if (contact) openContactDetail(contact);
+            });
+        });
+    }
+
     function showContactsLoading(title, subtitle) {
         const titleEl = contactsLoading?.querySelector('.contacts-loading__title');
         const subEl = contactsLoading?.querySelector('.contacts-loading__sub');
@@ -1310,9 +1344,9 @@ document.addEventListener('DOMContentLoaded', () => {
             const initial = (contact.name || contact.company || 'C').trim().charAt(0).toUpperCase();
             return `
                 <article class="saved-card" data-card-id="${contact.cardId}" role="button" tabindex="0">
-                    <div class="saved-card__preview">
+                    <div class="saved-card__preview${preview ? ' is-loading' : ''}">
                         ${preview
-                            ? `<img src="${preview}" alt="" loading="lazy">`
+                            ? `<span class="media-loader" aria-hidden="true"></span><img src="${preview}" alt="" loading="lazy">`
                             : `<div class="saved-card__preview-fallback">${escapeHtml(initial)}</div>`}
                     </div>
                     <div class="saved-card__body">
@@ -1329,6 +1363,13 @@ document.addEventListener('DOMContentLoaded', () => {
             `;
         }).join('');
 
+        contactsList.querySelectorAll('.saved-card__preview.is-loading img').forEach((img) => {
+            const frame = img.parentElement;
+            const finish = () => frame?.classList.remove('is-loading');
+            img.addEventListener('load', finish, { once: true });
+            img.addEventListener('error', finish, { once: true });
+            if (img.complete) finish();
+        });
         contactsList.querySelectorAll('.saved-card').forEach((card) => {
             const open = () => {
                 const contact = contactsData.find((c) => c.cardId === card.dataset.cardId);
@@ -1743,17 +1784,28 @@ document.addEventListener('DOMContentLoaded', () => {
         const photoBack = document.getElementById('contactDetailPhotoBack');
         const flipCard = document.getElementById('contactDetailFlipCard');
         flipCard?.classList.remove('is-flipped');
-        if (front) {
-            photo.onload = () => {
-                if (photo.naturalWidth && photo.naturalHeight) {
-                    flipCard.style.aspectRatio = `${photo.naturalWidth} / ${photo.naturalHeight}`;
+        const armPhoto = (img, src) => {
+            const face = img?.closest('.flip-card__face');
+            if (!img || !face) return;
+            if (!src) {
+                img.removeAttribute('src');
+                face.classList.remove('is-loading');
+                return;
+            }
+            face.classList.add('is-loading');
+            const finish = () => face.classList.remove('is-loading');
+            img.onload = () => {
+                if (img === photo && img.naturalWidth && img.naturalHeight && flipCard) {
+                    flipCard.style.aspectRatio = `${img.naturalWidth} / ${img.naturalHeight}`;
                 }
+                finish();
             };
-            photo.src = front;
-        }
-        else photo.removeAttribute('src');
-        if (back) photoBack.src = back;
-        else photoBack.removeAttribute('src');
+            img.onerror = finish;
+            img.src = src;
+            if (img.complete) finish();
+        };
+        armPhoto(photo, front);
+        armPhoto(photoBack, back);
         flipCard?.classList.toggle('is-single', !back);
         const hint = document.getElementById('contactDetailFlipHint');
         if (hint) hint.textContent = back ? 'Front · Tap to flip · Hold to view' : 'Front · Hold to view';
@@ -4499,7 +4551,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
 
                 const authenticated = await isAuthenticated();
-                setupGoogleSignIn();
 
                 if (authenticated) {
                     signOutBtn.classList.remove('hidden');
@@ -5825,6 +5876,10 @@ document.addEventListener('DOMContentLoaded', () => {
     updateScanIdleCopy();
     window.matchMedia('(min-width: 1024px)').addEventListener('change', updateScanIdleCopy);
 
+    document.getElementById('recentScansAll')?.addEventListener('click', () => {
+        switchToTab('contacts');
+    });
+
     document.getElementById('desktopWebcamBtn')?.addEventListener('click', (e) => {
         e.preventDefault();
         startLiveCamera(e.currentTarget);
@@ -6694,7 +6749,7 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (e) { /* ignore */ }
 
     if ('serviceWorker' in navigator) {
-        navigator.serviceWorker.register('/sw.js?v=10').then((reg) => {
+        navigator.serviceWorker.register('/sw.js?v=13').then((reg) => {
             const showUpdate = (worker) => {
                 waitingWorker = worker;
                 pwaUpdateBar?.classList.remove('hidden');

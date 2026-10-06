@@ -26,7 +26,7 @@
     <link rel="dns-prefetch" href="https://d3js.org">
     <link rel="dns-prefetch" href="https://cdnjs.cloudflare.com">
     <link rel="preconnect" href="https://accounts.google.com" crossorigin>
-    <link rel="preload" href="/styles.css?v=39" as="style">
+    <link rel="preload" href="/styles.css?v=44" as="style">
     <link rel="preload" href="/android-chrome-192x192.png" as="image">
     <style>
       /* Critical boot splash — paints before CSS bundle */
@@ -34,10 +34,7 @@
       #folioBoot {
         position: fixed; inset: 0; z-index: 9999;
         display: grid; place-items: center;
-        background:
-          radial-gradient(900px 560px at 12% -8%, rgba(96, 140, 255, 0.42) 0%, transparent 55%),
-          radial-gradient(780px 520px at 92% 8%, rgba(186, 120, 255, 0.28) 0%, transparent 52%),
-          linear-gradient(165deg, #101528 0%, #0a0c14 100%);
+        background: #070910;
         transition: opacity 0.4s ease, visibility 0.4s ease;
       }
       #folioBoot.is-done { opacity: 0; visibility: hidden; pointer-events: none; }
@@ -96,10 +93,30 @@
         }
       })();
     </script>
-    <link href="styles.css?v=39" rel="stylesheet">
+    <link href="styles.css?v=44" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
 <body>
+    <div class="ambient" aria-hidden="true">
+        <video class="ambient__video" autoplay muted loop playsinline preload="auto">
+            <source src="/assets/ambient.mp4" type="video/mp4">
+        </video>
+    </div>
+    <script>
+      (function () {
+        var video = document.querySelector('.ambient__video');
+        if (!video) return;
+        var reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
+        function sync() {
+          if (reduce.matches || document.hidden) video.pause();
+          else video.play().catch(function () {});
+        }
+        document.addEventListener('visibilitychange', sync);
+        video.addEventListener('canplay', sync);
+        if (reduce.addEventListener) reduce.addEventListener('change', sync);
+        sync();
+      })();
+    </script>
     <div id="folioBoot" aria-hidden="true">
         <div>
             <div class="boot-mark">Folio</div>
@@ -288,6 +305,14 @@
                 </div>
                 </div>
 
+                <section class="recent-scans hidden" id="recentScans" aria-label="Recent scans">
+                    <div class="recent-scans__head">
+                        <h3 class="recent-scans__title">Recent</h3>
+                        <button type="button" class="recent-scans__all" id="recentScansAll">See all</button>
+                    </div>
+                    <div class="recent-scans__grid" id="recentScansGrid"></div>
+                </section>
+
                 <div class="scan-utils" id="dropZone">
                     <input type="file" id="fileUpload" accept="image/*" multiple class="hidden">
                     <input type="file" id="fileUploadBack" accept="image/*" class="hidden">
@@ -414,9 +439,11 @@
                     <div class="flip-stage" id="contactDetailFlipStage">
                         <button type="button" class="flip-card" id="contactDetailFlipCard" aria-label="Tap to flip card">
                             <span class="flip-card__face flip-card__face--front">
+                                <span class="media-loader" aria-hidden="true"></span>
                                 <img id="contactDetailPhoto" alt="Front of visiting card">
                             </span>
                             <span class="flip-card__face flip-card__face--back">
+                                <span class="media-loader" aria-hidden="true"></span>
                                 <img id="contactDetailPhotoBack" alt="Back of visiting card">
                             </span>
                         </button>
@@ -820,15 +847,7 @@
                     <h3 id="signInTitle" style="margin-bottom:8px;">Sign in</h3>
                     <p class="hero-sub" style="margin:0 0 16px;">Create an account so scanned cards stay after you refresh.</p>
                     <div id="googleSignInWrap" class="google-sign-in hidden">
-                        <button type="button" id="googleSignInBtn" class="google-sign-in__btn">
-                            <svg class="google-sign-in__icon" viewBox="0 0 24 24" aria-hidden="true">
-                                <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-                                <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-                                <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
-                                <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
-                            </svg>
-                            <span>Continue with Google</span>
-                        </button>
+                        <div id="googleSignInBtn" class="google-sign-in__slot"></div>
                         <div class="google-sign-in__divider" role="separator">or</div>
                     </div>
                     <form id="signInForm">
@@ -1148,6 +1167,6 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.js"></script>
     <script src="card-crop.js?v=29"></script>
-    <script src="script.js?v=36"></script>
+    <script src="script.js?v=41"></script>
 </body>
 </html>

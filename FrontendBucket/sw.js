@@ -1,5 +1,5 @@
 /* Folio PWA service worker — fast shell, offline fallback, cross-platform */
-const SW_VERSION = 'folio-pwa-v14';
+const SW_VERSION = 'folio-pwa-v18';
 const SHELL_CACHE = `${SW_VERSION}-shell`;
 const ASSET_CACHE = `${SW_VERSION}-assets`;
 const RUNTIME_CACHE = `${SW_VERSION}-runtime`;
@@ -27,6 +27,7 @@ const ASSET_URLS = [
   '/assets/mascot-success.svg',
   '/assets/mascot-chat.svg',
   '/assets/scan-scene.svg',
+  '/assets/ambient.mp4',
 ];
 
 self.addEventListener('install', (event) => {
@@ -133,6 +134,9 @@ self.addEventListener('fetch', (event) => {
   if (request.method !== 'GET') return;
 
   const url = new URL(request.url);
+
+  // Google Sign-In breaks if its script, button, or FedCM calls are intercepted.
+  if (url.hostname === 'accounts.google.com' || url.hostname === 'apis.google.com') return;
 
   // Let API calls hit the network (app uses IndexedDB fallback)
   if (isApiRequest(url)) return;
