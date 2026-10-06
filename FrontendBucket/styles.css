@@ -186,15 +186,16 @@ body.camera-flashing .app-stage {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 52px;
+  gap: 12px;
+  min-height: 56px;
   padding: 10px var(--page-x) 8px;
   position: sticky;
   top: 0;
-  z-index: 20;
+  z-index: 40;
   background: linear-gradient(
     180deg,
-    rgba(10, 12, 20, 0.55) 0%,
-    rgba(10, 12, 20, 0.12) 70%,
+    rgba(10, 12, 20, 0.72) 0%,
+    rgba(10, 12, 20, 0.28) 70%,
     transparent 100%
   );
   backdrop-filter: blur(18px) saturate(160%);
@@ -202,21 +203,234 @@ body.camera-flashing .app-stage {
   border-bottom: none;
 }
 
+.brand-lockup {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.brand-mark {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  font-family: var(--font-display);
+  font-size: 0.92rem;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+  color: #0b1018;
+  background: linear-gradient(145deg, #f4efe6 0%, #c4a574 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    0 6px 16px rgba(0, 0, 0, 0.28);
+}
+
 .brand {
   font-family: var(--font-display);
-  font-size: 22px;
-  font-weight: 650;
-  letter-spacing: -0.03em;
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: -0.035em;
   color: var(--ink);
   margin: 0;
   line-height: 1.1;
-  text-shadow: 0 1px 12px rgba(126, 182, 255, 0.25);
 }
 
 .header-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 8px;
+  flex-shrink: 0;
+  position: relative;
+}
+
+.header-signin {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: linear-gradient(
+    165deg,
+    rgba(255, 255, 255, 0.16) 0%,
+    rgba(255, 255, 255, 0.06) 100%
+  );
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.84rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  padding: 9px 16px;
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  transition: background 0.18s ease, transform 0.18s ease, border-color 0.18s ease;
+}
+
+.header-signin:hover {
+  background: rgba(255, 255, 255, 0.18);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.header-signin:active {
+  transform: scale(0.97);
+}
+
+.header-signin.hidden {
+  display: none !important;
+}
+
+.account-menu {
+  position: relative;
+}
+
+.account-menu.hidden {
+  display: none !important;
+}
+
+.account-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(56vw, 220px);
+  padding: 5px 10px 5px 5px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  background: linear-gradient(
+    165deg,
+    rgba(255, 255, 255, 0.14) 0%,
+    rgba(255, 255, 255, 0.05) 100%
+  );
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  transition: background 0.18s ease, border-color 0.18s ease, transform 0.18s ease;
+}
+
+.account-chip:hover,
+.account-chip[aria-expanded="true"] {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.account-chip:active {
+  transform: scale(0.98);
+}
+
+.account-chip__avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  font-family: var(--font-display);
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #0b1018;
+  background: linear-gradient(145deg, #f7f3eb, #c4a574);
+}
+
+.account-chip__meta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.15;
+}
+
+.account-chip__name {
+  max-width: 110px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.account-chip__hint {
+  font-size: 0.62rem;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.01em;
+}
+
+.account-chip__caret {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  opacity: 0.7;
+  transition: transform 0.18s ease;
+}
+
+.account-chip[aria-expanded="true"] .account-chip__caret {
+  transform: rotate(180deg);
+}
+
+.account-menu__panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 50;
+  width: min(220px, calc(100vw - 32px));
+  padding: 6px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background:
+    linear-gradient(165deg, rgba(28, 32, 44, 0.96), rgba(14, 16, 24, 0.98));
+  box-shadow:
+    0 18px 40px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+}
+
+.account-menu__panel.hidden {
+  display: none !important;
+}
+
+.account-menu__item {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.account-menu__item:hover,
+.account-menu__item:focus-visible {
+  background: rgba(255, 255, 255, 0.08);
+  outline: none;
+}
+
+.account-menu__item span:first-child {
+  font-size: 0.86rem;
+  font-weight: 650;
+}
+
+.account-menu__item-hint {
+  font-size: 0.68rem;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.account-menu__item--danger span:first-child {
+  color: #ff8f8f;
+}
+
+.account-menu__item.hidden {
+  display: none !important;
 }
 
 .icon-btn {
@@ -428,12 +642,17 @@ body.scan-processing #scanCompleteMessage {
 }
 
 .hero-kicker {
-  display: none;
+  margin: 0 0 4px;
+  font-size: 0.72rem;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
 }
 
 .hero-title {
   font-family: var(--font-display);
-  font-size: 34px;
+  font-size: 28px;
   font-weight: 700;
   line-height: 1.05;
   letter-spacing: -0.03em;
@@ -1343,7 +1562,15 @@ body.camera-live .recent-scans {
   }
 
   .brand {
-    font-size: 1.95rem;
+    font-size: 1.2rem;
+  }
+
+  .account-chip__hint {
+    display: none;
+  }
+
+  .account-chip__name {
+    max-width: 88px;
   }
 
   .view-panel--scan {

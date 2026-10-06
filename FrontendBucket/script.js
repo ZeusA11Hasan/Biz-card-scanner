@@ -748,7 +748,7 @@ document.addEventListener('DOMContentLoaded', () => {
         userId = user?.id || null;
         window.userId = userId;
         if (user?.id) cacheAuthUser(user);
-        if (userId) signOutBtn?.classList.remove('hidden');
+        updateHeaderAuth(user);
     }
 
     function clearAuthSession() {
@@ -757,8 +757,54 @@ document.addEventListener('DOMContentLoaded', () => {
         userId = null;
         window.userId = null;
         contactsData = [];
-        signOutBtn?.classList.add('hidden');
         updateRecentScans();
+        updateHeaderAuth(null);
+        closeAccountMenu();
+    }
+
+    function accountLabel(user) {
+        return (user?.username || user?.email || user?.name || 'Account').toString().trim() || 'Account';
+    }
+
+    function accountInitial(user) {
+        const label = accountLabel(user);
+        return label.charAt(0).toUpperCase() || 'F';
+    }
+
+    function updateHeaderAuth(user) {
+        const signedIn = Boolean(user?.id || userId);
+        const signInBtn = document.getElementById('headerSignInBtn');
+        const menu = document.getElementById('accountMenu');
+        const nameEl = document.getElementById('accountName');
+        const avatarEl = document.getElementById('accountAvatar');
+        const activeUser = user || readCachedAuthUser();
+
+        if (signedIn && activeUser?.id) {
+            signInBtn?.classList.add('hidden');
+            menu?.classList.remove('hidden');
+            if (nameEl) nameEl.textContent = accountLabel(activeUser);
+            if (avatarEl) avatarEl.textContent = accountInitial(activeUser);
+        } else {
+            signInBtn?.classList.remove('hidden');
+            menu?.classList.add('hidden');
+            closeAccountMenu();
+        }
+    }
+
+    function closeAccountMenu() {
+        const btn = document.getElementById('accountMenuBtn');
+        const panel = document.getElementById('accountMenuPanel');
+        btn?.setAttribute('aria-expanded', 'false');
+        panel?.classList.add('hidden');
+    }
+
+    function toggleAccountMenu() {
+        const btn = document.getElementById('accountMenuBtn');
+        const panel = document.getElementById('accountMenuPanel');
+        if (!btn || !panel) return;
+        const open = panel.classList.contains('hidden');
+        btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+        panel.classList.toggle('hidden', !open);
     }
 
     async function fetchAuthMe(useBearer) {
@@ -4545,7 +4591,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (cachedUser?.id && cachedToken) {
                     applyAuthUser(cachedUser, cachedToken);
                     hideSignInModal();
-                    signOutBtn?.classList.remove('hidden');
                     scanTab?.classList.add('tab-active');
                     scanContent?.classList.remove('hidden');
                 }
@@ -4553,7 +4598,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 const authenticated = await isAuthenticated();
 
                 if (authenticated) {
-                    signOutBtn.classList.remove('hidden');
                     hideSignInModal();
                     scanTab.classList.add('tab-active');
                     scanContent.classList.remove('hidden');
@@ -4565,6 +4609,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         });
                 } else {
                     setBootStatus('Ready to sign in');
+                    updateHeaderAuth(null);
                     showSignInModal();
                 }
             } catch (error) {
@@ -4843,7 +4888,31 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    signOutBtn.addEventListener('click', async () => {
+    document.getElementById('headerSignInBtn')?.addEventListener('click', () => {
+        showSignInModal();
+    });
+
+    document.getElementById('accountMenuBtn')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleAccountMenu();
+    });
+
+    document.getElementById('accountMenuPanel')?.addEventListener('click', (e) => {
+        // Close after choosing an action, but keep install/my card handlers intact.
+        if (e.target.closest('.account-menu__item')) {
+            window.setTimeout(closeAccountMenu, 0);
+        }
+    });
+
+    document.addEventListener('click', (e) => {
+        if (!e.target.closest('#accountMenu')) closeAccountMenu();
+    });
+
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeAccountMenu();
+    });
+
+    signOutBtn?.addEventListener('click', async () => {
         showAuthLoading('Signing you out…', 'Clearing this device session.');
         try {
             await fetch(`${API_URL}/auth/logout`, {
@@ -6533,7 +6602,10 @@ document.addEventListener('DOMContentLoaded', () => {
         refreshMyCardPreview();
     });
 
-    myCardBtn?.addEventListener('click', () => switchToTab('mycard'));
+    myCardBtn?.addEventListener('click', () => {
+        closeAccountMenu();
+        switchToTab('mycard');
+    });
     document.getElementById('saveMyCardBtn')?.addEventListener('click', () => persistMyCard(readMyCardForm()));
 
     document.getElementById('shareMyCardBtn')?.addEventListener('click', async () => {
