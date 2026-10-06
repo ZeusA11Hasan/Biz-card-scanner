@@ -3112,32 +3112,33 @@ body.card-photo-open {
 }
 
 .pill-nav__item {
-  flex: 1;
+  flex: 1 1 0;
   border: none;
   background: transparent;
-  color: rgba(235, 240, 255, 0.55);
-  border-radius: var(--radius-pill);
+  color: rgba(235, 240, 255, 0.62);
+  border-radius: 18px;
+  min-width: 0;
   min-height: 0;
   height: auto;
-  padding: 6px 4px;
+  padding: 4px 2px 6px;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 2px;
+  gap: 3px;
   cursor: pointer;
   font-family: var(--font-ui);
   font-size: 10px;
-  font-weight: 500;
+  font-weight: 550;
   letter-spacing: 0.01em;
   line-height: 1.1;
-  transition: color 0.2s ease, background 0.2s ease;
+  transition: color 0.2s ease, background 0.2s ease, transform 0.18s ease;
 }
 
 .pill-nav__label {
   display: block;
   font-size: 10px;
-  font-weight: 500;
+  font-weight: 550;
   letter-spacing: 0.01em;
   line-height: 1.1;
 }
@@ -3146,6 +3147,7 @@ body.card-photo-open {
 .pill-nav__item .nav-ico {
   width: 22px;
   height: 22px;
+  display: block;
   overflow: visible;
 }
 
@@ -3155,31 +3157,63 @@ body.card-photo-open {
 }
 
 .pill-nav__icon {
-  width: 34px;
-  height: 28px;
-  border-radius: 12px;
+  position: relative;
+  width: 40px;
+  height: 40px;
+  border-radius: 14px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   color: inherit;
   background: transparent;
-  border: none;
+  border: 1px solid transparent;
   box-shadow: none;
   transform: none;
+  transition:
+    background 0.2s ease,
+    border-color 0.2s ease,
+    box-shadow 0.2s ease,
+    transform 0.18s ease;
+}
+
+.pill-nav__item:hover {
+  color: rgba(245, 247, 255, 0.92);
+}
+
+.pill-nav__item:hover .pill-nav__icon {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
 }
 
 .pill-nav__item.tab-active {
   color: #fff;
-  background: rgba(255, 255, 255, 0.14);
+  background: transparent;
 }
 
-.pill-nav__item.tab-active .pill-nav__icon,
+.pill-nav__item.tab-active .pill-nav__icon {
+  color: #fff;
+  background: linear-gradient(
+    165deg,
+    rgba(255, 255, 255, 0.3) 0%,
+    rgba(255, 255, 255, 0.1) 100%
+  );
+  border: 1px solid rgba(255, 255, 255, 0.38);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.5),
+    0 8px 18px rgba(0, 0, 0, 0.22);
+  backdrop-filter: blur(16px) saturate(160%);
+  -webkit-backdrop-filter: blur(16px) saturate(160%);
+  transform: none;
+}
+
 .pill-nav__item.tab-active .pill-nav__label {
   color: #fff;
   background: transparent;
   border: none;
   box-shadow: none;
   transform: none;
+  font-weight: 650;
 }
 
 .pill-nav__item,
@@ -3195,17 +3229,13 @@ body.card-photo-open {
 .pill-nav__item.nav-tap .pill-nav__icon::after {
   content: '';
   position: absolute;
-  width: 46px;
-  height: 46px;
-  border-radius: 50%;
-  border: 2px solid var(--copper);
+  width: 40px;
+  height: 40px;
+  border-radius: 14px;
+  border: 1.5px solid rgba(201, 176, 138, 0.7);
   opacity: 0;
   animation: navRipple 0.65s ease-out;
   pointer-events: none;
-}
-
-.pill-nav__icon {
-  position: relative;
 }
 
 @keyframes navIconBounce {
@@ -3387,13 +3417,18 @@ body.card-photo-open {
   box-shadow: none;
   width: auto;
   height: auto;
-  padding: 0;
-  border-radius: 50%;
+  padding: 4px 2px 6px;
+  border-radius: 18px;
 }
 
 #chatButton.pill-nav__item:hover {
   transform: none;
   background: transparent;
+}
+
+#chatButton.pill-nav__item:hover .pill-nav__icon {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -4606,25 +4641,45 @@ body.is-standalone #installAppBtn {
   }
 
   .pill-nav__icon {
-    width: 22px;
-    height: 22px;
+    width: 36px;
+    height: 36px;
+    border-radius: 12px;
+  }
+
+  .pill-nav__item svg,
+  .pill-nav__item .nav-ico {
+    width: 20px;
+    height: 20px;
   }
 
   .pill-nav__item:hover {
-    background: rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.06);
     transform: none;
     color: #fff;
   }
 
   .pill-nav__item.tab-active {
     color: #fff;
-    background: rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.08);
   }
 
-  .pill-nav__item.tab-active .pill-nav__label,
-  .pill-nav__item.tab-active .pill-nav__icon {
+  .pill-nav__item.tab-active .pill-nav__label {
     color: #fff;
     background: transparent;
+    transform: none;
+  }
+
+  .pill-nav__item.tab-active .pill-nav__icon {
+    color: #fff;
+    background: linear-gradient(
+      165deg,
+      rgba(255, 255, 255, 0.28) 0%,
+      rgba(255, 255, 255, 0.1) 100%
+    );
+    border: 1px solid rgba(255, 255, 255, 0.34);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.45),
+      0 6px 14px rgba(0, 0, 0, 0.2);
     transform: none;
   }
 
@@ -4637,7 +4692,7 @@ body.is-standalone #installAppBtn {
   }
 
   #chatButton.pill-nav__item:hover {
-    background: rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.06);
   }
 
   .scan-layout {
