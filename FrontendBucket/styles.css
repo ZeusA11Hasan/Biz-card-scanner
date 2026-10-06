@@ -504,11 +504,10 @@ body.scan-processing #scanCompleteMessage {
 /* —— Full realtime camera (primary scan UI) —— */
 .camera-panel {
   position: relative;
-  flex: 0 0 auto;
-  /* Compact home capture — leaves room for recent cards */
-  height: min(28dvh, 210px);
-  min-height: 160px;
-  max-height: min(28dvh, 210px);
+  flex: 1 1 auto;
+  min-height: 168px;
+  height: auto;
+  max-height: none;
   margin: 0;
   border-radius: 22px;
   overflow: hidden;
@@ -545,15 +544,15 @@ body.camera-live .recent-scans {
   display: none;
 }
 
-/* Recent scans on home */
+/* Recent scans on home — pinned above the nav */
 .recent-scans {
   flex: 0 0 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  margin-top: 4px;
-  padding-bottom: 2px;
+  margin-top: auto;
+  padding-bottom: 10px;
 }
 
 .recent-scans.hidden {
@@ -1297,9 +1296,9 @@ body.camera-live .recent-scans {
   }
 
   .camera-panel {
-    height: min(26dvh, 188px);
     min-height: 148px;
-    max-height: min(26dvh, 188px);
+    height: auto;
+    max-height: none;
     border-radius: 20px;
   }
 
@@ -1314,6 +1313,11 @@ body.camera-live .recent-scans {
       - env(safe-area-inset-bottom, 0px)
       - 12px
     );
+  }
+
+  .recent-scans {
+    margin-top: auto;
+    padding-bottom: 12px;
   }
 
   .camera-panel__scene {
@@ -4133,7 +4137,8 @@ body.is-standalone #installAppBtn {
   .camera-panel {
     max-height: none;
     min-height: 0;
-    height: min(34dvh, 280px);
+    height: auto;
+    flex: 1 1 auto;
   }
 
   .camera-panel.is-live {
@@ -4143,7 +4148,8 @@ body.is-standalone #installAppBtn {
 
   .recent-scans {
     flex: 0 0 auto;
-    margin-top: 8px;
+    margin-top: auto;
+    padding-bottom: 8px;
   }
 
   .recent-scans__grid {
