@@ -3796,8 +3796,9 @@ body.card-photo-open {
 
 .chat-header__status {
   margin: 2px 0 0;
-  font-size: 0.75rem;
-  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 550;
+  color: rgba(235, 240, 255, 0.82);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -3841,20 +3842,22 @@ body.card-photo-open {
 .chat-welcome__mascot {
   width: 108px;
   height: auto;
-  filter: drop-shadow(0 12px 18px rgba(27, 42, 74, 0.12));
+  filter: drop-shadow(0 12px 18px rgba(0, 0, 0, 0.35));
   animation: floaty 3.6s ease-in-out infinite;
 }
 
 .chat-welcome__bubble {
   margin-top: 10px;
-  background: var(--copper-soft);
-  color: var(--ink);
+  background: rgba(255, 255, 255, 0.12);
+  color: #f5f7ff;
+  border: 1px solid rgba(255, 255, 255, 0.2);
   border-radius: 18px 18px 18px 6px;
   padding: 10px 14px;
-  font-size: 0.88rem;
-  font-weight: 600;
-  max-width: 240px;
+  font-size: 0.9rem;
+  font-weight: 650;
+  max-width: 250px;
   text-align: center;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
   animation: bubbleIn 0.5s ease;
 }
 
@@ -3871,21 +3874,26 @@ body.card-photo-open {
 }
 
 .chat-chip {
-  border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.8);
-  color: var(--ink);
+  border: 1px solid rgba(201, 176, 138, 0.42);
+  background: linear-gradient(
+    165deg,
+    rgba(255, 255, 255, 0.14) 0%,
+    rgba(255, 255, 255, 0.06) 100%
+  );
+  color: #f5f7ff;
   border-radius: var(--radius-pill);
   padding: 8px 12px;
   font-family: var(--font-ui);
   font-size: 0.78rem;
-  font-weight: 600;
+  font-weight: 650;
   cursor: pointer;
-  transition: transform 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
-  box-shadow: var(--shadow-soft);
+  transition: transform 0.18s ease, background 0.18s ease, border-color 0.18s ease;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16);
 }
 
 .chat-chip:hover {
-  background: #fff;
+  background: rgba(255, 255, 255, 0.18);
+  border-color: rgba(201, 176, 138, 0.65);
   transform: translateY(-1px);
 }
 
@@ -3946,16 +3954,17 @@ body.card-photo-open {
 }
 
 .chat-bubble--user {
-  background: linear-gradient(145deg, #31476f, var(--ink));
+  background: linear-gradient(145deg, #3a527a, #1b2a4a);
   color: #fff;
   border-bottom-right-radius: 6px;
 }
 
 .chat-bubble--ai {
-  background: rgba(255, 255, 255, 0.92);
-  color: var(--ink);
-  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.12);
+  color: #f5f7ff;
+  border: 1px solid rgba(255, 255, 255, 0.18);
   border-bottom-left-radius: 6px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 
 .chat-typing {
@@ -3963,8 +3972,8 @@ body.card-photo-open {
   gap: 5px;
   align-items: center;
   padding: 12px 14px;
-  background: rgba(255,255,255,0.92);
-  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: 18px;
   border-bottom-left-radius: 6px;
 }
@@ -3983,8 +3992,8 @@ body.card-photo-open {
 .chat-composer,
 #chatForm.chat-composer {
   padding: 12px 14px 16px;
-  border-top: 1px solid var(--line);
-  background: linear-gradient(180deg, transparent, rgba(255,255,255,0.65));
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  background: linear-gradient(180deg, transparent, rgba(8, 10, 18, 0.45));
 }
 
 .chat-composer__field {
@@ -3993,15 +4002,18 @@ body.card-photo-open {
   gap: 8px;
   padding: 6px 6px 6px 16px;
   border-radius: 999px;
-  background: #fff;
-  border: 1.5px solid rgba(196, 165, 116, 0.45);
-  box-shadow: var(--shadow-soft);
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1.5px solid rgba(201, 176, 138, 0.4);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
 }
 
 .chat-composer__field:focus-within {
+  background: rgba(255, 255, 255, 0.14);
   border-color: var(--copper);
-  box-shadow: 0 0 0 3px rgba(196, 165, 116, 0.2);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    0 0 0 3px rgba(201, 176, 138, 0.18);
 }
 
 .chat-composer__input,
@@ -4012,9 +4024,15 @@ body.card-photo-open {
   background: transparent;
   font-family: var(--font-ui);
   font-size: 0.95rem;
-  color: var(--ink);
+  color: #f5f7ff;
   min-width: 0;
   padding: 10px 0;
+}
+
+.chat-composer__input::placeholder,
+#chatInput.chat-composer__input::placeholder {
+  color: rgba(235, 240, 255, 0.55);
+  opacity: 1;
 }
 
 .chat-send {
@@ -4025,11 +4043,11 @@ body.card-photo-open {
   border-radius: 50%;
   flex-shrink: 0;
   cursor: pointer;
-  color: #fff;
-  background: linear-gradient(145deg, #3a527a 0%, var(--ink) 55%, #101828 100%);
+  color: #0b1018;
+  background: linear-gradient(145deg, #f4efe6 0%, #c4a574 100%);
   box-shadow:
-    0 10px 20px rgba(27, 42, 74, 0.28),
-    inset 0 1px 0 rgba(255,255,255,0.22);
+    0 10px 20px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.45);
   display: inline-flex;
   align-items: center;
   justify-content: center;
